@@ -1,50 +1,314 @@
-name: Build APK
-on: [push]
+name: Build Aether Mobile Ultra APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: '17'
+  NDK_VERSION: '26.1.10909125'
+  CMAKE_VERSION: '3.22.1'
+  BUILD_TOOLS_VERSION: '34.0.0'
+  PLATFORM_VERSION: 'android-34'
+  TARGET_ABI: 'arm64-v8a'
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
+    timeout-minutes: 45
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      # ── 1. Checkout ─────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Setup Java ───────────────────────────────────────────
+      - name: Setup JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
         with:
-          distribution: temurin
-          java-version: 17
-      - uses: android-actions/setup-android@v3
-      - name: SDK, NDK e CMake
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: 'gradle'
+
+      # ── 3. Setup Android SDK ────────────────────────────────────
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept SDK licenses & install components
         run: |
-          yes | sdkmanager --licenses
-          sdkmanager "ndk;26.1.10909125" "build-tools;34.0.0" "cmake;3.22.1" "platforms;android-34"
-      - name: Ferramentas (7z + Gradle)
+          yes | sdkmanager --licenses || true
+          sdkmanager --install \
+            "ndk;${{ env.NDK_VERSION }}" \
+            "build-tools;${{ env.BUILD_TOOLS_VERSION }}" \
+            "cmake;${{ env.CMAKE_VERSION }}" \
+            "platforms;${{ env.PLATFORM_VERSION }}" \
+            "platform-tools"
+        shell: bash
+
+      # ── 4. Extrair projeto (detecta formato automaticamente) ───
+      - name: Detect & extract project archive
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y p7zip-full
-          wget -q https://services.gradle.org/distributions/gradle-8.5-bin.zip
-          sudo unzip -q -d /opt gradle-8.5-bin.zip
-      - name: Extrair projeto
-        run: |
+          echo "=== Arquivos no repo ==="
           ls -la
-          (unzip -o Aether_Mobile_Ultra_GitHub.zip || unzip -o Aether_Mobile_Ultra_GitHub.7z || unzip -o Aether_Mobile_Ultra_GitHub.pack || unzip -o projeto.zip || 7z x -y Aether_Mobile_Ultra_GitHub.zip || 7z x -y Aether_Mobile_Ultra_GitHub.7z || 7z x -y Aether_Mobile_Ultra_GitHub.pack || 7z x -y projeto.zip)
+
+          ARCHIVE=""
+          for f in Aether_Mobile_Ultra_GitHub.zip Aether_Mobile_Ultra_GitHub.7z Aether_Mobile_Ultra_GitHub.pack projeto.zip *.zip *.7z; do
+            if [ -f "$f" ]; then
+              ARCHIVE="$f"
+              echo "Arquivo encontrado: $ARCHIVE"
+              break
+            fi
+          done
+
+          if [ -z "$ARCHIVE" ]; then
+            echo "Nenhum arquivo compactado encontrado. Assumindo que o projeto já está extraído."
+            exit 0
+          fi
+
+          echo "Extraindo $ARCHIVE..."
+          case "$ARCHIVE" in
+            *.zip)
+              unzip -q -o "$ARCHIVE"
+              ;;
+            *.7z)
+              sudo apt-get update -qq
+              sudo apt-get install -y -qq p7zip-full
+              7z x -y "$ARCHIVE"
+              ;;
+            *)
+              echo "Formato não suportado: $ARCHIVE"
+              exit 1
+              ;;
+          esac
+
+          echo "=== Estrutura após extração ==="
           ls -la
-      - name: Ajustes automaticos
+          find . -maxdepth 2 -type d | head -30
+        shell: bash
+
+      # ── 5. Localizar diretório do projeto Android ──────────────
+      - name: Locate Android project directory
+        id: locate
         run: |
-          sed -i 's/find_package(Vulkan REQUIRED)/find_library(VULKAN_LIB vulkan)\n  if(NOT VULKAN_LIB)\n    message(FATAL_ERROR "libvulkan nao encontrada")\n  endif()/' engine/CMakeLists.txt
-          sed -i 's/Vulkan::Vulkan/${VULKAN_LIB}/g' engine/CMakeLists.txt
-          sed -i 's|add_library(gta_v_mobile_ultra SHARED main_android.cpp)|add_library(gta_v_mobile_ultra SHARED main_android.cpp ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)|' game/CMakeLists.txt
-          sed -i 's/def abi = /def targetAbi = /' android/app/build.gradle
-          sed -i 's/abiFilters abi/abiFilters targetAbi/' android/app/build.gradle
-          sed -i 's/^            include abi$/            include targetAbi/' android/app/build.gradle
-          sed -i 's|\./gradlew|gradle|g' scripts/build_android.sh
-          keytool -genkeypair -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-      - name: Compilar APK
+          # Tenta encontrar o diretório que contém app/build.gradle
+          PROJECT_DIR=""
+          for d in . Aether Aether_Mobile_Ultra android; do
+            if [ -f "$d/app/build.gradle" ] || [ -f "$d/app/build.gradle.kts" ]; then
+              PROJECT_DIR="$d"
+              echo "Projeto Android encontrado em: $PROJECT_DIR"
+              break
+            fi
+          done
+
+          # Se não achou, procura recursivamente (mas evita .gradle/)
+          if [ -z "$PROJECT_DIR" ]; then
+            PROJECT_DIR=$(find . -maxdepth 3 -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) -path "*/app/*" ! -path "*/.gradle/*" -print -quit | xargs dirname | xargs dirname 2>/dev/null || echo "")
+          fi
+
+          if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
+            echo "Usando diretório raiz como projeto Android"
+            PROJECT_DIR="."
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          echo "Diretório do projeto definido como: $PROJECT_DIR"
+        shell: bash
+
+      # ── 6. Corrigir compatibilidade Gradle/AGP ─────────────────
+      - name: Fix Gradle & AGP compatibility
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
         run: |
-          chmod +x scripts/*.sh
-          export PATH=/opt/gradle-8.5/bin:$PATH
-          ./scripts/build_android.sh --config release --abi arm64-v8a
-      - name: Enviar APK
+          echo "=== Arquivos Gradle ==="
+          ls -la gradle/wrapper/ 2>/dev/null || echo "Sem wrapper"
+          cat gradle/wrapper/gradle-wrapper.properties 2>/dev/null || echo "Sem gradle-wrapper.properties"
+
+          # Se não tem wrapper, cria um compatível com AGP 8.1+
+          if [ ! -f "gradlew" ]; then
+            echo "Criando Gradle Wrapper..."
+            mkdir -p gradle/wrapper
+
+            cat > gradle/wrapper/gradle-wrapper.properties << 'EOF'
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip
+networkTimeout=10000
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+EOF
+
+            curl -L -o gradle/wrapper/gradle-wrapper.jar \
+              https://raw.githubusercontent.com/gradle/gradle/v8.2.0/gradle/wrapper/gradle-wrapper.jar
+
+            cat > gradlew << 'EOF'
+#!/bin/sh
+exec "$(dirname "$0")/gradle/wrapper/gradle-wrapper.jar" "$@"
+EOF
+            chmod +x gradlew
+          fi
+
+          # Garante que o wrapper use uma versão compatível
+          # AGP 8.1.x requer Gradle 8.0+
+          # AGP 8.2.x requer Gradle 8.2+
+          sed -i 's|gradle-[0-9.]*-bin.zip|gradle-8.2-bin.zip|' gradle/wrapper/gradle-wrapper.properties || true
+          sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.2-all.zip|' gradle/wrapper/gradle-wrapper.properties || true
+
+          echo "=== gradle-wrapper.properties final ==="
+          cat gradle/wrapper/gradle-wrapper.properties
+        shell: bash
+
+      # ── 7. Corrigir build.gradle (sintaxe nativa) ─────────────
+      - name: Fix build.gradle native syntax
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          BUILD_FILE="app/build.gradle"
+          if [ ! -f "$BUILD_FILE" ]; then
+            BUILD_FILE="app/build.gradle.kts"
+          fi
+
+          if [ ! -f "$BUILD_FILE" ]; then
+            echo "ERRO: app/build.gradle não encontrado!"
+            find . -name "build.gradle*" -type f | head -10
+            exit 1
+          fi
+
+          echo "=== build.gradle original (primeiras 80 linhas) ==="
+          head -n 80 "$BUILD_FILE"
+
+          # Corrige namespace (obrigatório no AGP 8+)
+          if ! grep -q "namespace" "$BUILD_FILE"; then
+            echo "Adicionando namespace..."
+            # Extrai applicationId para usar como namespace
+            APP_ID=$(grep -oP "applicationId\s+[\"']\K[^\"']+" "$BUILD_FILE" | head -1 || echo "com.aether.mobile")
+            sed -i "s/android\s*{/android {\n    namespace '${APP_ID}'/" "$BUILD_FILE"
+          fi
+
+          # Corrige compileSdkVersion para compileSdk (AGP 8+)
+          sed -i 's/compileSdkVersion/compileSdk/g' "$BUILD_FILE"
+
+          # Corrige minSdkVersion/targetSdkVersion (AGP 8+)
+          sed -i 's/minSdkVersion/minSdk/g' "$BUILD_FILE"
+          sed -i 's/targetSdkVersion/targetSdk/g' "$BUILD_FILE"
+
+          # Garante que externalNativeBuild use sintaxe correta
+          # Remove configurações cmake duplicadas ou malformadas
+          if grep -q "externalNativeBuild" "$BUILD_FILE"; then
+            echo "externalNativeBuild detectado - verificando sintaxe..."
+          fi
+
+          echo "=== build.gradle corrigido (primeiras 80 linhas) ==="
+          head -n 80 "$BUILD_FILE"
+        shell: bash
+
+      # ── 8. Corrigir CMakeLists.txt (Vulkan & Native App Glue) ─
+      - name: Fix CMakeLists.txt
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          # Procura todos os CMakeLists.txt
+          for cmakefile in $(find . -name "CMakeLists.txt" -not -path "*/.cxx/*" -not -path "*/build/*"); do
+            echo "Processando: $cmakefile"
+
+            # Fix Vulkan: find_package -> find_library para compatibilidade
+            sed -i 's/find_package(Vulkan REQUIRED)/find_library(VULKAN_LIB vulkan)\nif(NOT VULKAN_LIB)\n  message(FATAL_ERROR "Vulkan library not found")\nendif()/' "$cmakefile" 2>/dev/null || true
+            sed -i 's/Vulkan::Vulkan/${VULKAN_LIB}/g' "$cmakefile" 2>/dev/null || true
+
+            # Fix Native App Glue
+            if grep -q "native_app_glue" "$cmakefile"; then
+              echo "Native app glue já referenciado em $cmakefile"
+            fi
+          done
+        shell: bash
+
+      # ── 9. Criar local.properties ──────────────────────────────
+      - name: Create local.properties
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          NDK_PATH="$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}"
+          CMAKE_PATH="$ANDROID_HOME/cmake/${{ env.CMAKE_VERSION }}/bin"
+
+          cat > local.properties << EOF
+sdk.dir=$ANDROID_HOME
+ndk.dir=$NDK_PATH
+cmake.dir=$ANDROID_HOME/cmake/${{ env.CMAKE_VERSION }}
+EOF
+
+          echo "=== local.properties ==="
+          cat local.properties
+          echo "=== Verificando NDK ==="
+          ls -la "$NDK_PATH" 2>/dev/null || echo "NDK não encontrado em $NDK_PATH"
+          echo "=== Verificando CMake ==="
+          ls -la "$CMAKE_PATH/cmake" 2>/dev/null || echo "CMake não encontrado"
+        shell: bash
+
+      # ── 10. Criar keystore de debug ────────────────────────────
+      - name: Create debug keystore
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          mkdir -p android/app
+          if [ ! -f "android/app/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore android/app/debug.keystore \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+        shell: bash
+
+      # ── 11. Build Debug APK ────────────────────────────────────
+      - name: Build Debug APK
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          chmod +x gradlew
+          ./gradlew clean assembleDebug \
+            -Pandroid.injected.build.abi=${{ env.TARGET_ABI }} \
+            --stacktrace \
+            --info \
+            --no-daemon
+        shell: bash
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+
+      # ── 12. Build Release APK (opcional) ───────────────────────
+      - name: Build Release APK
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          ./gradlew assembleRelease \
+            -Pandroid.injected.build.abi=${{ env.TARGET_ABI }} \
+            --no-daemon
+        shell: bash
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+
+      # ── 13. Encontrar e listar APKs ────────────────────────────
+      - name: Find APKs
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          echo "=== Procurando APKs ==="
+          find . -name "*.apk" -type f | while read apk; do
+            ls -lh "$apk"
+            echo "APK: $apk"
+          done
+        shell: bash
+
+      # ── 14. Upload Debug APK ───────────────────────────────────
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: aether-apk
-          path: build/android-*/**/*.apk
+          name: aether-debug-apk
+          path: ${{ steps.locate.outputs.PROJECT_DIR }}/**/build/outputs/apk/debug/*.apk
+
+      # ── 15. Upload Release APK ─────────────────────────────────
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: aether-release-apk
+          path: ${{ steps.locate.outputs.PROJECT_DIR }}/**/build/outputs/apk/release/*.apk
           
