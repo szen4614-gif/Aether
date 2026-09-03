@@ -14,6 +14,7 @@ env:
   BUILD_TOOLS_VERSION: '34.0.0'
   PLATFORM_VERSION: 'android-34'
   TARGET_ABI: 'arm64-v8a'
+  GRADLE_VERSION: '8.2'
 
 jobs:
   build:
@@ -21,53 +22,55 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      # Step 1: Checkout
+      # ============================================================
+      # STEP 1: Checkout
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Step 2: Setup Java
+      # ============================================================
+      # STEP 2: Setup Java
+      # ============================================================
       - name: Setup JDK
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: ${{ env.JAVA_VERSION }}
-          cache: 'gradle'
 
-      # Step 3: Setup Android SDK
+      # ============================================================
+      # STEP 3: Setup Android SDK
+      # ============================================================
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept SDK licenses and install components
+      - name: Install Android components
         run: |
           yes | sdkmanager --licenses || true
-          sdkmanager --install             "ndk;${{ env.NDK_VERSION }}"             "build-tools;${{ env.BUILD_TOOLS_VERSION }}"             "cmake;${{ env.CMAKE_VERSION }}"             "platforms;${{ env.PLATFORM_VERSION }}"             "platform-tools"
+          sdkmanager --install "ndk;${{ env.NDK_VERSION }}" "build-tools;${{ env.BUILD_TOOLS_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}" "platforms;${{ env.PLATFORM_VERSION }}" "platform-tools"
         shell: bash
 
-      # Step 4: Detect and extract project archive
+      # ============================================================
+      # STEP 4: Detect and extract project archive
+      # ============================================================
       - name: Detect and extract project archive
         run: |
           echo "=== Files in repo ==="
           ls -la
-
           ARCHIVE=""
-          for f in Aether_Mobile_Ultra_GitHub.zip Aether_Mobile_Ultra_GitHub.7z Aether_Mobile_Ultra_GitHub.pack projeto.zip *.zip *.7z; do
+          for f in Aether_Mobile_Ultra_GitHub.zip Aether_Mobile_Ultra_GitHub.7z projeto.zip *.zip *.7z; do
             if [ -f "$f" ]; then
               ARCHIVE="$f"
               echo "Archive found: $ARCHIVE"
               break
             fi
           done
-
           if [ -z "$ARCHIVE" ]; then
             echo "No archive found. Assuming project is already extracted."
             exit 0
           fi
-
           echo "Extracting $ARCHIVE..."
           case "$ARCHIVE" in
-            *.zip)
-              unzip -q -o "$ARCHIVE"
-              ;;
+            *.zip) unzip -q -o "$ARCHIVE" ;;
             *.7z)
               sudo apt-get update -qq
               sudo apt-get install -y -qq p7zip-full
@@ -78,13 +81,14 @@ jobs:
               exit 1
               ;;
           esac
-
           echo "=== Structure after extraction ==="
           ls -la
           find . -maxdepth 2 -type d | head -30
         shell: bash
 
-      # Step 5: Locate Android project directory
+      # ============================================================
+      # STEP 5: Locate Android project directory
+      # ============================================================
       - name: Locate Android project directory
         id: locate
         run: |
@@ -96,67 +100,67 @@ jobs:
               break
             fi
           done
-
           if [ -z "$PROJECT_DIR" ]; then
-            PROJECT_DIR=$(find . -maxdepth 3 -type f               \( -name "build.gradle" -o -name "build.gradle.kts" \)               -path "*/app/*" ! -path "*/.gradle/*" -print -quit |               xargs dirname 2>/dev/null | xargs dirname 2>/dev/null || echo "")
+            PROJECT_DIR=$(find . -maxdepth 3 -type f -name "build.gradle" -o -name "build.gradle.kts" | grep "/app/" | head -1 | xargs dirname 2>/dev/null | xargs dirname 2>/dev/null || echo "")
           fi
-
           if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
             echo "Using root as Android project"
             PROJECT_DIR="."
           fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_OUTPUT
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
           echo "Project directory set to: $PROJECT_DIR"
         shell: bash
 
-      # Step 6: Fix Gradle wrapper compatibility
-      - name: Fix Gradle wrapper compatibility
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+      # ============================================================
+      # STEP 6: Fix Gradle wrapper (download gradle, run wrapper task)
+      # ============================================================
+      - name: Fix Gradle wrapper
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
-          echo "=== Gradle files ==="
-          ls -la gradle/wrapper/ 2>/dev/null || echo "No wrapper"
+          echo "=== Checking for existing wrapper ==="
+          ls -la gradle/wrapper/ 2>/dev/null || echo "No wrapper directory"
           cat gradle/wrapper/gradle-wrapper.properties 2>/dev/null || echo "No gradle-wrapper.properties"
 
-          if [ ! -f "gradlew" ]; then
-            echo "Creating Gradle Wrapper..."
-            mkdir -p gradle/wrapper
-
-            cat > gradle/wrapper/gradle-wrapper.properties << 'WRAPPEREOF'
-distributionBase=GRADLE_USER_HOME
-distributionPath=wrapper/dists
-distributionUrl=https\://services.gradle.org/distributions/gradle-8.2-bin.zip
-networkTimeout=10000
-validateDistributionUrl=true
-zipStoreBase=GRADLE_USER_HOME
-zipStorePath=wrapper/dists
-WRAPPEREOF
-
-            curl -L -o gradle/wrapper/gradle-wrapper.jar               https://raw.githubusercontent.com/gradle/gradle/v8.2.0/gradle/wrapper/gradle-wrapper.jar
-
-            cat > gradlew << 'GRADLEWEOF'
-#!/bin/sh
-exec "$(dirname "$0")/gradle/wrapper/gradle-wrapper.jar" "$@"
-GRADLEWEOF
-            chmod +x gradlew
+          if [ -f "gradlew" ]; then
+            echo "gradlew already exists. Skipping wrapper creation."
+            # Just fix the version in existing wrapper
+            sed -i 's|gradle-[0-9.]*-bin.zip|gradle-8.2-bin.zip|' gradle/wrapper/gradle-wrapper.properties || true
+            sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.2-all.zip|' gradle/wrapper/gradle-wrapper.properties || true
+            cat gradle/wrapper/gradle-wrapper.properties
+            exit 0
           fi
 
-          sed -i 's|gradle-[0-9.]*-bin.zip|gradle-8.2-bin.zip|' gradle/wrapper/gradle-wrapper.properties || true
-          sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.2-all.zip|' gradle/wrapper/gradle-wrapper.properties || true
+          echo "No gradlew found. Downloading Gradle and creating wrapper..."
 
-          echo "=== Final gradle-wrapper.properties ==="
+          # Download Gradle distribution
+          GRADLE_URL="https://services.gradle.org/distributions/gradle-8.2-bin.zip"
+          curl -sL -o /tmp/gradle-8.2-bin.zip "$GRADLE_URL"
+          unzip -q -o /tmp/gradle-8.2-bin.zip -d /tmp/
+          GRADLE_BIN="/tmp/gradle-8.2/bin/gradle"
+
+          # Create minimal settings.gradle if missing (required for wrapper task)
+          if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
+            echo "rootProject.name = 'AetherProject'" > settings.gradle
+          fi
+
+          # Generate wrapper using downloaded gradle
+          "$GRADLE_BIN" wrapper --gradle-version 8.2 --distribution-type bin
+
+          # Verify
+          ls -la gradlew
           cat gradle/wrapper/gradle-wrapper.properties
         shell: bash
 
-      # Step 7: Fix build.gradle syntax
+      # ============================================================
+      # STEP 7: Fix build.gradle syntax for AGP 8.x
+      # ============================================================
       - name: Fix build.gradle syntax
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
           BUILD_FILE="app/build.gradle"
           if [ ! -f "$BUILD_FILE" ]; then
             BUILD_FILE="app/build.gradle.kts"
           fi
-
           if [ ! -f "$BUILD_FILE" ]; then
             echo "ERROR: app/build.gradle not found!"
             find . -name "build.gradle*" -type f | head -10
@@ -166,13 +170,14 @@ GRADLEWEOF
           echo "=== Original build.gradle (first 80 lines) ==="
           head -n 80 "$BUILD_FILE"
 
+          # Add namespace if missing (required in AGP 8+)
           if ! grep -q "namespace" "$BUILD_FILE"; then
             echo "Adding namespace..."
-            APP_ID=$(grep -oP "applicationId\s+\["']\K[^"']+" "$BUILD_FILE" | head -1 || echo "com.aether.mobile")
-            sed -i "s/android\s*{/android {
-    namespace '${APP_ID}'/" "$BUILD_FILE"
+            APP_ID=$(grep -oP "applicationId\s+\"\K[^\"]+" "$BUILD_FILE" | head -1 || echo "com.aether.mobile")
+            sed -i "s/android\s*{/android {\n    namespace '${APP_ID}'/" "$BUILD_FILE"
           fi
 
+          # Fix deprecated property names
           sed -i 's/compileSdkVersion/compileSdk/g' "$BUILD_FILE"
           sed -i 's/minSdkVersion/minSdk/g' "$BUILD_FILE"
           sed -i 's/targetSdkVersion/targetSdk/g' "$BUILD_FILE"
@@ -181,32 +186,31 @@ GRADLEWEOF
           head -n 80 "$BUILD_FILE"
         shell: bash
 
-      # Step 8: Fix CMakeLists.txt
+      # ============================================================
+      # STEP 8: Fix CMakeLists.txt (Vulkan compatibility)
+      # ============================================================
       - name: Fix CMakeLists.txt
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
           for cmakefile in $(find . -name "CMakeLists.txt" -not -path "*/.cxx/*" -not -path "*/build/*"); do
             echo "Processing: $cmakefile"
-            sed -i 's/find_package(Vulkan REQUIRED)/find_library(VULKAN_LIB vulkan)
-if(NOT VULKAN_LIB)
-  message(FATAL_ERROR "Vulkan library not found")
-endif()/' "$cmakefile" 2>/dev/null || true
+            sed -i 's/find_package(Vulkan REQUIRED)/find_library(VULKAN_LIB vulkan)\nif(NOT VULKAN_LIB)\n  message(FATAL_ERROR "Vulkan library not found")\nendif()/' "$cmakefile" 2>/dev/null || true
             sed -i 's/Vulkan::Vulkan/${VULKAN_LIB}/g' "$cmakefile" 2>/dev/null || true
           done
         shell: bash
 
-      # Step 9: Create local.properties
+      # ============================================================
+      # STEP 9: Create local.properties
+      # ============================================================
       - name: Create local.properties
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
           ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           NDK_PATH="$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}"
 
-          cat > local.properties << PROPEOF
-sdk.dir=$ANDROID_HOME
-ndk.dir=$NDK_PATH
-cmake.dir=$ANDROID_HOME/cmake/${{ env.CMAKE_VERSION }}
-PROPEOF
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          echo "ndk.dir=$NDK_PATH" >> local.properties
+          echo "cmake.dir=$ANDROID_HOME/cmake/${{ env.CMAKE_VERSION }}" >> local.properties
 
           echo "=== local.properties ==="
           cat local.properties
@@ -214,38 +218,46 @@ PROPEOF
           ls -la "$NDK_PATH" 2>/dev/null || echo "NDK not found at $NDK_PATH"
         shell: bash
 
-      # Step 10: Create debug keystore
+      # ============================================================
+      # STEP 10: Create debug keystore
+      # ============================================================
       - name: Create debug keystore
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
           mkdir -p android/app
           if [ ! -f "android/app/debug.keystore" ]; then
-            keytool -genkeypair -v               -keystore android/app/debug.keystore               -storepass android               -alias androiddebugkey               -keypass android               -keyalg RSA               -keysize 2048               -validity 10000               -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkeypair -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
         shell: bash
 
-      # Step 11: Build Debug APK
+      # ============================================================
+      # STEP 11: Build Debug APK
+      # ============================================================
       - name: Build Debug APK
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
           chmod +x gradlew
-          ./gradlew clean assembleDebug             -Pandroid.injected.build.abi=${{ env.TARGET_ABI }}             --stacktrace             --info             --no-daemon
+          ./gradlew clean assembleDebug -Pandroid.injected.build.abi=${{ env.TARGET_ABI }} --stacktrace --info --no-daemon
         shell: bash
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
 
-      # Step 12: Build Release APK
+      # ============================================================
+      # STEP 12: Build Release APK
+      # ============================================================
       - name: Build Release APK
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
-          ./gradlew assembleRelease             -Pandroid.injected.build.abi=${{ env.TARGET_ABI }}             --no-daemon
+          ./gradlew assembleRelease -Pandroid.injected.build.abi=${{ env.TARGET_ABI }} --no-daemon
         shell: bash
         env:
           ANDROID_HOME: /usr/local/lib/android/sdk
 
-      # Step 13: Find APKs
+      # ============================================================
+      # STEP 13: Find APKs
+      # ============================================================
       - name: Find APKs
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        working-directory: ${{ steps.locate.outputs.project_dir }}
         run: |
           echo "=== Searching for APKs ==="
           find . -name "*.apk" -type f | while read apk; do
@@ -254,17 +266,21 @@ PROPEOF
           done
         shell: bash
 
-      # Step 14: Upload Debug APK
+      # ============================================================
+      # STEP 14: Upload Debug APK
+      # ============================================================
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: aether-debug-apk
-          path: ${{ steps.locate.outputs.PROJECT_DIR }}/**/build/outputs/apk/debug/*.apk
+          path: ${{ steps.locate.outputs.project_dir }}/**/build/outputs/apk/debug/*.apk
 
-      # Step 15: Upload Release APK
+      # ============================================================
+      # STEP 15: Upload Release APK
+      # ============================================================
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: aether-release-apk
-          path: ${{ steps.locate.outputs.PROJECT_DIR }}/**/build/outputs/apk/release/*.apk
+          path: ${{ steps.locate.outputs.project_dir }}/**/build/outputs/apk/release/*.apk
           
