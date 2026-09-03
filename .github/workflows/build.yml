@@ -32,6 +32,9 @@ jobs:
           sed -i 's/find_package(Vulkan REQUIRED)/find_library(VULKAN_LIB vulkan)\n  if(NOT VULKAN_LIB)\n    message(FATAL_ERROR "libvulkan nao encontrada")\n  endif()/' engine/CMakeLists.txt
           sed -i 's/Vulkan::Vulkan/${VULKAN_LIB}/g' engine/CMakeLists.txt
           sed -i 's|add_library(gta_v_mobile_ultra SHARED main_android.cpp)|add_library(gta_v_mobile_ultra SHARED main_android.cpp ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)|' game/CMakeLists.txt
+          sed -i 's/def abi = /def targetAbi = /' android/app/build.gradle
+          sed -i 's/abiFilters abi/abiFilters targetAbi/' android/app/build.gradle
+          sed -i 's/^            include abi$/            include targetAbi/' android/app/build.gradle
           sed -i 's|\./gradlew|gradle|g' scripts/build_android.sh
           keytool -genkeypair -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
       - name: Compilar APK
