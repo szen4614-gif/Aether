@@ -3,6 +3,8 @@ on: [push]
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -10,20 +12,33 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: android-actions/setup-android@v3
-      - name: Setup NDK
+      - name: SDK, NDK e CMake
         run: |
           yes | sdkmanager --licenses
-          sdkmanager "ndk;26.1.10909125" "build-tools;34.0.0"
-      - name: Instalar 7z
-        run: sudo apt-get update -qq && sudo apt-get install -y p7zip-full
+          sdkmanager "ndk;26.1.10909125" "build-tools;34.0.0" "cmake;3.22.1" "platforms;android-34"
+      - name: Ferramentas (7z + Gradle)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full
+          wget -q https://services.gradle.org/distributions/gradle-8.5-bin.zip
+          sudo unzip -q -d /opt gradle-8.5-bin.zip
       - name: Extrair projeto
         run: |
           ls -la
           (unzip -o Aether_Mobile_Ultra_GitHub.zip || unzip -o Aether_Mobile_Ultra_GitHub.7z || unzip -o Aether_Mobile_Ultra_GitHub.pack || unzip -o projeto.zip || 7z x -y Aether_Mobile_Ultra_GitHub.zip || 7z x -y Aether_Mobile_Ultra_GitHub.7z || 7z x -y Aether_Mobile_Ultra_GitHub.pack || 7z x -y projeto.zip)
-          echo "=== RESULTADO ==="
           ls -la
+      - name: Ajustes automaticos
+        run: |
+          sed -i 's/find_package(Vulkan REQUIRED)/find_library(VULKAN_LIB vulkan)\n  if(NOT VULKAN_LIB)\n    message(FATAL_ERROR "libvulkan nao encontrada")\n  endif()/' engine/CMakeLists.txt
+          sed -i 's/Vulkan::Vulkan/${VULKAN_LIB}/g' engine/CMakeLists.txt
+          sed -i 's|add_library(gta_v_mobile_ultra SHARED main_android.cpp)|add_library(gta_v_mobile_ultra SHARED main_android.cpp ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)|' game/CMakeLists.txt
+          sed -i 's|\./gradlew|gradle|g' scripts/build_android.sh
+          keytool -genkeypair -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
       - name: Compilar APK
-        run: ./scripts/build_android.sh --config release --abi arm64-v8a
+        run: |
+          chmod +x scripts/*.sh
+          export PATH=/opt/gradle-8.5/bin:$PATH
+          ./scripts/build_android.sh --config release --abi arm64-v8a
       - name: Enviar APK
         uses: actions/upload-artifact@v4
         with:
