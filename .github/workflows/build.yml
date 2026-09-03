@@ -14,7 +14,6 @@ env:
   BUILD_TOOLS_VERSION: '34.0.0'
   PLATFORM_VERSION: 'android-34'
   TARGET_ABI: 'arm64-v8a'
-  GRADLE_VERSION: '8.2'
 
 jobs:
   build:
@@ -50,37 +49,60 @@ jobs:
         shell: bash
 
       # ============================================================
-      # STEP 4: Detect and extract project archive
+      # STEP 4: Detect, verify format and extract project archive
       # ============================================================
       - name: Detect and extract project archive
         run: |
           echo "=== Files in repo ==="
           ls -la
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq p7zip-full p7zip-rar file
+
           ARCHIVE=""
           for f in Aether_Mobile_Ultra_GitHub.zip Aether_Mobile_Ultra_GitHub.7z projeto.zip *.zip *.7z; do
             if [ -f "$f" ]; then
+              echo "Found candidate: $f (size: $(stat -c%s "$f" 2>/dev/null || echo 'unknown') bytes)"
               ARCHIVE="$f"
-              echo "Archive found: $ARCHIVE"
               break
             fi
           done
+
           if [ -z "$ARCHIVE" ]; then
             echo "No archive found. Assuming project is already extracted."
             exit 0
           fi
-          echo "Extracting $ARCHIVE..."
-          case "$ARCHIVE" in
-            *.zip) unzip -q -o "$ARCHIVE" ;;
-            *.7z)
-              sudo apt-get update -qq
-              sudo apt-get install -y -qq p7zip-full
-              7z x -y "$ARCHIVE"
-              ;;
-            *)
-              echo "Unsupported format: $ARCHIVE"
-              exit 1
-              ;;
-          esac
+
+          echo "=== Checking real file type ==="
+          file "$ARCHIVE"
+          xxd -l 8 "$ARCHIVE" | head -1
+
+          echo "=== Attempting extraction ==="
+          EXTRACTED=0
+
+          # Try 7z first (handles 7z, zip, rar, and fake extensions)
+          echo "[TRY 1] 7z x -y $ARCHIVE"
+          7z x -y "$ARCHIVE"
+          if [ $? -eq 0 ]; then
+            echo "[SUCCESS] 7z extracted successfully!"
+            EXTRACTED=1
+          else
+            echo "[FAIL] 7z failed, trying unzip..."
+            unzip -q -o "$ARCHIVE" 2>/tmp/unzip_err.log
+            if [ $? -eq 0 ]; then
+              echo "[SUCCESS] unzip worked!"
+              EXTRACTED=1
+            else
+              echo "[FAIL] unzip failed:"
+              cat /tmp/unzip_err.log | head -5
+            fi
+          fi
+
+          if [ $EXTRACTED -eq 0 ]; then
+            echo "ERROR: Could not extract archive with any method."
+            exit 1
+          fi
+
           echo "=== Structure after extraction ==="
           ls -la
           find . -maxdepth 2 -type d | head -30
@@ -112,7 +134,7 @@ jobs:
         shell: bash
 
       # ============================================================
-      # STEP 6: Fix Gradle wrapper (download gradle, run wrapper task)
+      # STEP 6: Fix Gradle wrapper
       # ============================================================
       - name: Fix Gradle wrapper
         working-directory: ${{ steps.locate.outputs.project_dir }}
@@ -122,8 +144,7 @@ jobs:
           cat gradle/wrapper/gradle-wrapper.properties 2>/dev/null || echo "No gradle-wrapper.properties"
 
           if [ -f "gradlew" ]; then
-            echo "gradlew already exists. Skipping wrapper creation."
-            # Just fix the version in existing wrapper
+            echo "gradlew already exists. Fixing version..."
             sed -i 's|gradle-[0-9.]*-bin.zip|gradle-8.2-bin.zip|' gradle/wrapper/gradle-wrapper.properties || true
             sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.2-all.zip|' gradle/wrapper/gradle-wrapper.properties || true
             cat gradle/wrapper/gradle-wrapper.properties
@@ -131,22 +152,15 @@ jobs:
           fi
 
           echo "No gradlew found. Downloading Gradle and creating wrapper..."
-
-          # Download Gradle distribution
-          GRADLE_URL="https://services.gradle.org/distributions/gradle-8.2-bin.zip"
-          curl -sL -o /tmp/gradle-8.2-bin.zip "$GRADLE_URL"
+          curl -sL -o /tmp/gradle-8.2-bin.zip "https://services.gradle.org/distributions/gradle-8.2-bin.zip"
           unzip -q -o /tmp/gradle-8.2-bin.zip -d /tmp/
           GRADLE_BIN="/tmp/gradle-8.2/bin/gradle"
 
-          # Create minimal settings.gradle if missing (required for wrapper task)
           if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
             echo "rootProject.name = 'AetherProject'" > settings.gradle
           fi
 
-          # Generate wrapper using downloaded gradle
           "$GRADLE_BIN" wrapper --gradle-version 8.2 --distribution-type bin
-
-          # Verify
           ls -la gradlew
           cat gradle/wrapper/gradle-wrapper.properties
         shell: bash
@@ -170,14 +184,12 @@ jobs:
           echo "=== Original build.gradle (first 80 lines) ==="
           head -n 80 "$BUILD_FILE"
 
-          # Add namespace if missing (required in AGP 8+)
           if ! grep -q "namespace" "$BUILD_FILE"; then
             echo "Adding namespace..."
             APP_ID=$(grep -oP "applicationId\s+\"\K[^\"]+" "$BUILD_FILE" | head -1 || echo "com.aether.mobile")
             sed -i "s/android\s*{/android {\n    namespace '${APP_ID}'/" "$BUILD_FILE"
           fi
 
-          # Fix deprecated property names
           sed -i 's/compileSdkVersion/compileSdk/g' "$BUILD_FILE"
           sed -i 's/minSdkVersion/minSdk/g' "$BUILD_FILE"
           sed -i 's/targetSdkVersion/targetSdk/g' "$BUILD_FILE"
@@ -207,15 +219,11 @@ jobs:
         run: |
           ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           NDK_PATH="$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}"
-
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           echo "ndk.dir=$NDK_PATH" >> local.properties
           echo "cmake.dir=$ANDROID_HOME/cmake/${{ env.CMAKE_VERSION }}" >> local.properties
-
           echo "=== local.properties ==="
           cat local.properties
-          echo "=== Checking NDK ==="
-          ls -la "$NDK_PATH" 2>/dev/null || echo "NDK not found at $NDK_PATH"
         shell: bash
 
       # ============================================================
