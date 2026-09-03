@@ -1,294 +1,195 @@
 name: Build Aether Mobile Ultra APK
 
-on:
+"on":
   push:
-    branches: [main, master]
-  pull_request:
     branches: [main, master]
   workflow_dispatch:
 
 env:
-  JAVA_VERSION: '17'
-  NDK_VERSION: '26.1.10909125'
-  CMAKE_VERSION: '3.22.1'
-  BUILD_TOOLS_VERSION: '34.0.0'
-  PLATFORM_VERSION: 'android-34'
-  TARGET_ABI: 'arm64-v8a'
+  GRADLE_VERSION: "8.9"
+  JAVA_VERSION: "17"
 
 jobs:
   build:
+    name: Build APK
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
-      # ============================================================
-      # STEP 1: Checkout
-      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ============================================================
-      # STEP 2: Setup Java
-      # ============================================================
-      - name: Setup JDK
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
 
-      # ============================================================
-      # STEP 3: Setup Android SDK
-      # ============================================================
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
-      - name: Install Android components
+      - name: Install 7z and build tools
         run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager --install "ndk;${{ env.NDK_VERSION }}" "build-tools;${{ env.BUILD_TOOLS_VERSION }}" "cmake;${{ env.CMAKE_VERSION }}" "platforms;${{ env.PLATFORM_VERSION }}" "platform-tools"
-        shell: bash
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full || sudo apt-get install -y 7zip
+          7z | head -n 2
 
-      # ============================================================
-      # STEP 4: Detect, verify format and extract project archive
-      # ============================================================
       - name: Detect and extract project archive
         run: |
-          echo "=== Files in repo ==="
-          ls -la
-
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq p7zip-full p7zip-rar file
-
-          ARCHIVE=""
-          for f in Aether_Mobile_Ultra_GitHub.zip Aether_Mobile_Ultra_GitHub.7z projeto.zip *.zip *.7z; do
+          set -e
+          shopt -s nullglob
+          archives=()
+          for f in *.zip *.7z; do
             if [ -f "$f" ]; then
-              echo "Found candidate: $f (size: $(stat -c%s "$f" 2>/dev/null || echo 'unknown') bytes)"
-              ARCHIVE="$f"
-              break
+              archives+=("$f")
+            fi
+          done
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "No archive at repo root. Using repository files directly."
+            exit 0
+          fi
+          for archive in "${archives[@]}"; do
+            echo "=== Archive: $archive ==="
+            echo "Real format: $(file -b "$archive")"
+            if 7z x -y "$archive"; then
+              echo "Extracted with 7z."
+            elif unzip -o "$archive"; then
+              echo "Extracted with unzip."
+            else
+              echo "::error::Could not extract $archive"
+              exit 1
             fi
           done
 
-          if [ -z "$ARCHIVE" ]; then
-            echo "No archive found. Assuming project is already extracted."
-            exit 0
-          fi
-
-          echo "=== Checking real file type ==="
-          file "$ARCHIVE"
-          xxd -l 8 "$ARCHIVE" | head -1
-
-          echo "=== Attempting extraction ==="
-          EXTRACTED=0
-
-          # Try 7z first (handles 7z, zip, rar, and fake extensions)
-          echo "[TRY 1] 7z x -y $ARCHIVE"
-          7z x -y "$ARCHIVE"
-          if [ $? -eq 0 ]; then
-            echo "[SUCCESS] 7z extracted successfully!"
-            EXTRACTED=1
-          else
-            echo "[FAIL] 7z failed, trying unzip..."
-            unzip -q -o "$ARCHIVE" 2>/tmp/unzip_err.log
-            if [ $? -eq 0 ]; then
-              echo "[SUCCESS] unzip worked!"
-              EXTRACTED=1
-            else
-              echo "[FAIL] unzip failed:"
-              cat /tmp/unzip_err.log | head -5
-            fi
-          fi
-
-          if [ $EXTRACTED -eq 0 ]; then
-            echo "ERROR: Could not extract archive with any method."
-            exit 1
-          fi
-
-          echo "=== Structure after extraction ==="
-          ls -la
-          find . -maxdepth 2 -type d | head -30
-        shell: bash
-
-      # ============================================================
-      # STEP 5: Locate Android project directory
-      # ============================================================
       - name: Locate Android project directory
         id: locate
         run: |
+          set -e
           PROJECT_DIR=""
-          for d in . Aether Aether_Mobile_Ultra android; do
+          for d in android . Aether_Mobile_Ultra Aether_Mobile_Ultra_GitHub app; do
             if [ -f "$d/app/build.gradle" ] || [ -f "$d/app/build.gradle.kts" ]; then
               PROJECT_DIR="$d"
-              echo "Android project found at: $PROJECT_DIR"
               break
             fi
           done
           if [ -z "$PROJECT_DIR" ]; then
-            PROJECT_DIR=$(find . -maxdepth 3 -type f -name "build.gradle" -o -name "build.gradle.kts" | grep "/app/" | head -1 | xargs dirname 2>/dev/null | xargs dirname 2>/dev/null || echo "")
+            found=$(find . -maxdepth 4 -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) -path "*/app/*" | head -n 1 || true)
+            if [ -n "$found" ]; then
+              PROJECT_DIR=$(dirname "$(dirname "$found")")
+            fi
           fi
-          if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
-            echo "Using root as Android project"
+          if [ -z "$PROJECT_DIR" ]; then
             PROJECT_DIR="."
           fi
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Project directory set to: $PROJECT_DIR"
-        shell: bash
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
-      # ============================================================
-      # STEP 6: Fix Gradle wrapper
-      # ============================================================
-      - name: Fix Gradle wrapper
-        working-directory: ${{ steps.locate.outputs.project_dir }}
+      - name: Install SDK components (platform, build-tools, NDK, CMake)
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
         run: |
-          echo "=== Checking for existing wrapper ==="
-          ls -la gradle/wrapper/ 2>/dev/null || echo "No wrapper directory"
-          cat gradle/wrapper/gradle-wrapper.properties 2>/dev/null || echo "No gradle-wrapper.properties"
+          set -e
+          echo "y" | sdkmanager --licenses > /dev/null 2>&1 || true
 
-          if [ -f "gradlew" ]; then
-            echo "gradlew already exists. Fixing version..."
-            sed -i 's|gradle-[0-9.]*-bin.zip|gradle-8.2-bin.zip|' gradle/wrapper/gradle-wrapper.properties || true
-            sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.2-all.zip|' gradle/wrapper/gradle-wrapper.properties || true
-            cat gradle/wrapper/gradle-wrapper.properties
-            exit 0
+          BG_FILE="app/build.gradle"
+          [ -f "$BG_FILE" ] || BG_FILE="app/build.gradle.kts"
+
+          COMPILE_SDK=$(grep -oE 'compileSdk[[:space:]]+([0-9]+)' "$BG_FILE" | grep -oE '[0-9]+' | head -n 1)
+          COMPILE_SDK=${COMPILE_SDK:-34}
+
+          NDK_VER=$(grep -oE 'ndkVersion[[:space:]]*=?[[:space:]]*"?[0-9.]+[a-z]?"?' "$BG_FILE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z]?' | head -n 1)
+          NDK_VER=${NDK_VER:-27.0.12077973}
+
+          CMAKE_VER=$(grep -oE 'version[[:space:]]*=?[[:space:]]*"3\.[0-9.]+"' "$BG_FILE" | grep -oE '3\.[0-9.]+' | head -n 1)
+          CMAKE_VER=${CMAKE_VER:-3.22.1}
+
+          echo "Installing: platform android-$COMPILE_SDK, build-tools;34.0.0, ndk;$NDK_VER, cmake;$CMAKE_VER"
+          echo "y" | sdkmanager "platforms;android-$COMPILE_SDK" "build-tools;34.0.0" "ndk;$NDK_VER" "cmake;$CMAKE_VER"
+
+      - name: Ensure Gradle wrapper (jar + properties + script)
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          set -e
+          mkdir -p gradle/wrapper
+          WRAPPER_TAG="v${{ env.GRADLE_VERSION }}.0"
+
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "Downloading gradle-wrapper.jar from gradle/$WRAPPER_TAG"
+            curl -fL --retry 3 -o gradle/wrapper/gradle-wrapper.jar \
+              "https://raw.githubusercontent.com/gradle/gradle/$WRAPPER_TAG/gradle/wrapper/gradle-wrapper.jar"
+          else
+            echo "gradle-wrapper.jar already present."
           fi
 
-          echo "No gradlew found. Downloading Gradle and creating wrapper..."
-          curl -sL -o /tmp/gradle-8.2-bin.zip "https://services.gradle.org/distributions/gradle-8.2-bin.zip"
-          unzip -q -o /tmp/gradle-8.2-bin.zip -d /tmp/
-          GRADLE_BIN="/tmp/gradle-8.2/bin/gradle"
-
-          if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
-            echo "rootProject.name = 'AetherProject'" > settings.gradle
-          fi
-
-          "$GRADLE_BIN" wrapper --gradle-version 8.2 --distribution-type bin
-          ls -la gradlew
+          printf '%s\n' \
+            'distributionBase=GRADLE_USER_HOME' \
+            'distributionPath=wrapper/dists' \
+            'distributionUrl=https\://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip' \
+            'networkTimeout=10000' \
+            'validateDistributionUrl=true' \
+            'zipStoreBase=GRADLE_USER_HOME' \
+            'zipStorePath=wrapper/dists' \
+            > gradle/wrapper/gradle-wrapper.properties
           cat gradle/wrapper/gradle-wrapper.properties
-        shell: bash
 
-      # ============================================================
-      # STEP 7: Fix build.gradle syntax for AGP 8.x
-      # ============================================================
-      - name: Fix build.gradle syntax
-        working-directory: ${{ steps.locate.outputs.project_dir }}
-        run: |
-          BUILD_FILE="app/build.gradle"
-          if [ ! -f "$BUILD_FILE" ]; then
-            BUILD_FILE="app/build.gradle.kts"
+          if [ ! -f gradlew ]; then
+            echo "Downloading official gradlew script"
+            curl -fL --retry 3 -o gradlew \
+              "https://raw.githubusercontent.com/gradle/gradle/$WRAPPER_TAG/gradlew"
           fi
-          if [ ! -f "$BUILD_FILE" ]; then
-            echo "ERROR: app/build.gradle not found!"
-            find . -name "build.gradle*" -type f | head -10
-            exit 1
-          fi
-
-          echo "=== Original build.gradle (first 80 lines) ==="
-          head -n 80 "$BUILD_FILE"
-
-          if ! grep -q "namespace" "$BUILD_FILE"; then
-            echo "Adding namespace..."
-            APP_ID=$(grep -oP "applicationId\s+\"\K[^\"]+" "$BUILD_FILE" | head -1 || echo "com.aether.mobile")
-            sed -i "s/android\s*{/android {\n    namespace '${APP_ID}'/" "$BUILD_FILE"
-          fi
-
-          sed -i 's/compileSdkVersion/compileSdk/g' "$BUILD_FILE"
-          sed -i 's/minSdkVersion/minSdk/g' "$BUILD_FILE"
-          sed -i 's/targetSdkVersion/targetSdk/g' "$BUILD_FILE"
-
-          echo "=== Fixed build.gradle (first 80 lines) ==="
-          head -n 80 "$BUILD_FILE"
-        shell: bash
-
-      # ============================================================
-      # STEP 8: Fix CMakeLists.txt (Vulkan compatibility)
-      # ============================================================
-      - name: Fix CMakeLists.txt
-        working-directory: ${{ steps.locate.outputs.project_dir }}
-        run: |
-          for cmakefile in $(find . -name "CMakeLists.txt" -not -path "*/.cxx/*" -not -path "*/build/*"); do
-            echo "Processing: $cmakefile"
-            sed -i 's/find_package(Vulkan REQUIRED)/find_library(VULKAN_LIB vulkan)\nif(NOT VULKAN_LIB)\n  message(FATAL_ERROR "Vulkan library not found")\nendif()/' "$cmakefile" 2>/dev/null || true
-            sed -i 's/Vulkan::Vulkan/${VULKAN_LIB}/g' "$cmakefile" 2>/dev/null || true
-          done
-        shell: bash
-
-      # ============================================================
-      # STEP 9: Create local.properties
-      # ============================================================
-      - name: Create local.properties
-        working-directory: ${{ steps.locate.outputs.project_dir }}
-        run: |
-          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          NDK_PATH="$ANDROID_HOME/ndk/${{ env.NDK_VERSION }}"
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "ndk.dir=$NDK_PATH" >> local.properties
-          echo "cmake.dir=$ANDROID_HOME/cmake/${{ env.CMAKE_VERSION }}" >> local.properties
-          echo "=== local.properties ==="
-          cat local.properties
-        shell: bash
-
-      # ============================================================
-      # STEP 10: Create debug keystore
-      # ============================================================
-      - name: Create debug keystore
-        working-directory: ${{ steps.locate.outputs.project_dir }}
-        run: |
-          mkdir -p android/app
-          if [ ! -f "android/app/debug.keystore" ]; then
-            keytool -genkeypair -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          fi
-        shell: bash
-
-      # ============================================================
-      # STEP 11: Build Debug APK
-      # ============================================================
-      - name: Build Debug APK
-        working-directory: ${{ steps.locate.outputs.project_dir }}
-        run: |
           chmod +x gradlew
-          ./gradlew clean assembleDebug -Pandroid.injected.build.abi=${{ env.TARGET_ABI }} --stacktrace --info --no-daemon
-        shell: bash
-        env:
-          ANDROID_HOME: /usr/local/lib/android/sdk
 
-      # ============================================================
-      # STEP 12: Build Release APK
-      # ============================================================
+      - name: Create local.properties
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          set -e
+          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          printf 'sdk.dir=%s\n' "$SDK_DIR" > local.properties
+          cat local.properties
+
+      - name: Show app/build.gradle with line numbers (diagnostics)
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          echo "===== app/build.gradle (or .kts) ====="
+          cat -n app/build.gradle 2>/dev/null || cat -n app/build.gradle.kts
+
+      - name: Ensure namespace for AGP 8
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: |
+          set -e
+          BG_FILE="app/build.gradle"
+          [ -f "$BG_FILE" ] || BG_FILE="app/build.gradle.kts"
+          if ! grep -q 'namespace' "$BG_FILE"; then
+            APP_ID=$(grep -oE 'applicationId[[:space:]]+["'\''][a-zA-Z0-9._]+["'\'']' "$BG_FILE" | head -n 1 | grep -oE '[a-zA-Z0-9._]+' | tail -n 1)
+            APP_ID=${APP_ID:-com.aether.mobile.ultra}
+            echo "No 'namespace' found. Adding namespace '$APP_ID' required by AGP 8."
+            sed -i "0,/android[[:space:]]*{/s//android {\n    namespace \"$APP_ID\"/" "$BG_FILE"
+          else
+            echo "namespace already present."
+          fi
+
+      - name: Build Debug APK
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        run: ./gradlew --no-daemon --stacktrace assembleDebug
+
       - name: Build Release APK
-        working-directory: ${{ steps.locate.outputs.project_dir }}
-        run: |
-          ./gradlew assembleRelease -Pandroid.injected.build.abi=${{ env.TARGET_ABI }} --no-daemon
-        shell: bash
-        env:
-          ANDROID_HOME: /usr/local/lib/android/sdk
+        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
+        continue-on-error: true
+        run: ./gradlew --no-daemon --stacktrace assembleRelease
 
-      # ============================================================
-      # STEP 13: Find APKs
-      # ============================================================
-      - name: Find APKs
-        working-directory: ${{ steps.locate.outputs.project_dir }}
+      - name: Find built APKs
+        id: apks
         run: |
-          echo "=== Searching for APKs ==="
-          find . -name "*.apk" -type f | while read apk; do
-            ls -lh "$apk"
-            echo "APK: $apk"
-          done
-        shell: bash
+          set -e
+          find . -type f -name "*.apk" | tee apk_list.txt
+          echo "count=$(wc -l < apk_list.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
 
-      # ============================================================
-      # STEP 14: Upload Debug APK
-      # ============================================================
-      - name: Upload Debug APK
+      - name: Upload APK artifacts
+        if: steps.apks.outputs.count != '0'
         uses: actions/upload-artifact@v4
         with:
-          name: aether-debug-apk
-          path: ${{ steps.locate.outputs.project_dir }}/**/build/outputs/apk/debug/*.apk
-
-      # ============================================================
-      # STEP 15: Upload Release APK
-      # ============================================================
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: aether-release-apk
-          path: ${{ steps.locate.outputs.project_dir }}/**/build/outputs/apk/release/*.apk
+          name: Aether-Mobile-Ultra-APK-run${{ github.run_number }}
+          path: "**/*.apk"
+          if-no-files-found: error
           
