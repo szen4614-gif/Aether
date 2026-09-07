@@ -4,8 +4,11 @@ on:
   workflow_dispatch:
 
   push:
+    branches:
+      - main
+      - principal
     tags:
-      - "v*"
+      - 'v*'
 
 permissions:
   contents: write
@@ -16,65 +19,63 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Baixar o código do repositório
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Configurar Java
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '17'
           cache: gradle
 
-      # 3. Configurar Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      # 4. Dar permissão ao Gradle
-      - name: Make Gradle executable
+      - name: Give Gradle permission
         run: chmod +x ./gradlew
 
-      # 5. Compilar APK Debug
+      - name: Check project
+        run: |
+          echo "=== Projeto ==="
+          pwd
+          echo "=== Arquivos ==="
+          ls -la
+          echo "=== Android ==="
+          ls -la android || true
+
       - name: Build Debug APK
         run: |
           ./gradlew :android:app:assembleDebug \
             --stacktrace \
             --no-daemon
 
-      # 6. Disponibilizar APK para download no Actions
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: nebula-cloud-phone-g15-debug
-          path: |
-            android/app/build/outputs/apk/debug/*.apk
+          path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
-      # 7. Compilar Release quando for criada uma tag
       - name: Build Release APK
-        if: startsWith(github.ref, "refs/tags/v")
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           ./gradlew :android:app:assembleRelease \
             --stacktrace \
             --no-daemon
 
-      # 8. Disponibilizar Release APK
       - name: Upload Release APK
-        if: startsWith(github.ref, "refs/tags/v")
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: nebula-cloud-phone-g15-release
-          path: |
-            android/app/build/outputs/apk/release/*.apk
+          path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
-      # 9. Criar GitHub Release automaticamente
       - name: Create GitHub Release
-        if: startsWith(github.ref, "refs/tags/v")
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            android/app/build/outputs/apk/release/*.apk
+          files: android/app/build/outputs/apk/release/*.apk
