@@ -1,194 +1,80 @@
-name: Build Aether Mobile Ultra APK
+name: Build Nebula Cloud Phone G15 APK
 
-"on":
-  push:
-    branches: [main, master]
+on:
   workflow_dispatch:
 
-env:
-  GRADLE_VERSION: "8.9"
-  JAVA_VERSION: "17"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
-  build:
-    name: Build APK
+  build-apk:
+    name: Build Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 60
 
     steps:
-      - name: Checkout repository
+      # 1. Baixar o código do repositório
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
+      # 2. Configurar Java
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
+          java-version: "17"
+          cache: gradle
 
+      # 3. Configurar Android SDK
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
+        uses: android-actions/setup-android@v3
 
-      - name: Install 7z and build tools
-        run: |
-          set -e
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full || sudo apt-get install -y 7zip
-          7z | head -n 2
+      # 4. Dar permissão ao Gradle
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
 
-      - name: Detect and extract project archive
-        run: |
-          set -e
-          shopt -s nullglob
-          archives=()
-          for f in *.zip *.7z; do
-            if [ -f "$f" ]; then
-              archives+=("$f")
-            fi
-          done
-          if [ ${#archives[@]} -eq 0 ]; then
-            echo "No archive at repo root. Using repository files directly."
-            exit 0
-          fi
-          for archive in "${archives[@]}"; do
-            echo "=== Archive: $archive ==="
-            echo "Real format: $(file -b "$archive")"
-            if 7z x -y "$archive"; then
-              echo "Extracted with 7z."
-            elif unzip -o "$archive"; then
-              echo "Extracted with unzip."
-            else
-              echo "::error::Could not extract $archive"
-              exit 1
-            fi
-          done
-
-      - name: Locate Android project directory
-        id: locate
-        run: |
-          set -e
-          PROJECT_DIR=""
-          for d in android . Aether_Mobile_Ultra Aether_Mobile_Ultra_GitHub app; do
-            if [ -f "$d/app/build.gradle" ] || [ -f "$d/app/build.gradle.kts" ]; then
-              PROJECT_DIR="$d"
-              break
-            fi
-          done
-          if [ -z "$PROJECT_DIR" ]; then
-            found=$(find . -maxdepth 4 -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) -path "*/app/*" | head -n 1 || true)
-            if [ -n "$found" ]; then
-              PROJECT_DIR=$(dirname "$(dirname "$found")")
-            fi
-          fi
-          if [ -z "$PROJECT_DIR" ]; then
-            PROJECT_DIR="."
-          fi
-          echo "PROJECT_DIR=$PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Install SDK components (platform, build-tools, NDK, CMake)
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
-        run: |
-          set -e
-          echo "y" | sdkmanager --licenses > /dev/null 2>&1 || true
-
-          BG_FILE="app/build.gradle"
-          [ -f "$BG_FILE" ] || BG_FILE="app/build.gradle.kts"
-
-          COMPILE_SDK=$(grep -oE 'compileSdk[[:space:]]+([0-9]+)' "$BG_FILE" | grep -oE '[0-9]+' | head -n 1)
-          COMPILE_SDK=${COMPILE_SDK:-34}
-
-          NDK_VER=$(grep -oE 'ndkVersion[[:space:]]*=?[[:space:]]*"?[0-9.]+[a-z]?"?' "$BG_FILE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z]?' | head -n 1)
-          NDK_VER=${NDK_VER:-27.0.12077973}
-
-          CMAKE_VER=$(grep -oE 'version[[:space:]]*=?[[:space:]]*"3\.[0-9.]+"' "$BG_FILE" | grep -oE '3\.[0-9.]+' | head -n 1)
-          CMAKE_VER=${CMAKE_VER:-3.22.1}
-
-          echo "Installing: platform android-$COMPILE_SDK, build-tools;34.0.0, ndk;$NDK_VER, cmake;$CMAKE_VER"
-          echo "y" | sdkmanager "platforms;android-$COMPILE_SDK" "build-tools;34.0.0" "ndk;$NDK_VER" "cmake;$CMAKE_VER"
-
-      - name: Ensure Gradle wrapper (jar + properties + script)
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
-        run: |
-          set -e
-          mkdir -p gradle/wrapper
-          WRAPPER_TAG="v${{ env.GRADLE_VERSION }}.0"
-
-          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-            echo "Downloading gradle-wrapper.jar from gradle/$WRAPPER_TAG"
-            curl -fL --retry 3 -o gradle/wrapper/gradle-wrapper.jar \
-              "https://raw.githubusercontent.com/gradle/gradle/$WRAPPER_TAG/gradle/wrapper/gradle-wrapper.jar"
-          else
-            echo "gradle-wrapper.jar already present."
-          fi
-
-          printf '%s\n' \
-            'distributionBase=GRADLE_USER_HOME' \
-            'distributionPath=wrapper/dists' \
-            'distributionUrl=https\://services.gradle.org/distributions/gradle-${{ env.GRADLE_VERSION }}-bin.zip' \
-            'networkTimeout=10000' \
-            'validateDistributionUrl=true' \
-            'zipStoreBase=GRADLE_USER_HOME' \
-            'zipStorePath=wrapper/dists' \
-            > gradle/wrapper/gradle-wrapper.properties
-          cat gradle/wrapper/gradle-wrapper.properties
-
-          if [ ! -f gradlew ]; then
-            echo "Downloading official gradlew script"
-            curl -fL --retry 3 -o gradlew \
-              "https://raw.githubusercontent.com/gradle/gradle/$WRAPPER_TAG/gradlew"
-          fi
-          chmod +x gradlew
-
-      - name: Create local.properties
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
-        run: |
-          set -e
-          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          printf 'sdk.dir=%s\n' "$SDK_DIR" > local.properties
-          cat local.properties
-
-      - name: Show app/build.gradle with line numbers (diagnostics)
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
-        run: |
-          echo "===== app/build.gradle (or .kts) ====="
-          cat -n app/build.gradle 2>/dev/null || cat -n app/build.gradle.kts
-
-      - name: Ensure namespace for AGP 8
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
-        run: |
-          set -e
-          BG_FILE="app/build.gradle"
-          [ -f "$BG_FILE" ] || BG_FILE="app/build.gradle.kts"
-          if ! grep -q 'namespace' "$BG_FILE"; then
-            APP_ID=$(grep -oE 'applicationId[[:space:]]+["'\''][a-zA-Z0-9._]+["'\'']' "$BG_FILE" | head -n 1 | grep -oE '[a-zA-Z0-9._]+' | tail -n 1)
-            APP_ID=${APP_ID:-com.aether.mobile.ultra}
-            echo "No 'namespace' found. Adding namespace '$APP_ID' required by AGP 8."
-            sed -i "0,/android[[:space:]]*{/s//android {\n    namespace \"$APP_ID\"/" "$BG_FILE"
-          else
-            echo "namespace already present."
-          fi
-
+      # 5. Compilar APK Debug
       - name: Build Debug APK
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
-        run: ./gradlew --no-daemon --stacktrace assembleDebug
-
-      - name: Build Release APK
-        working-directory: ${{ steps.locate.outputs.PROJECT_DIR }}
-        continue-on-error: true
-        run: ./gradlew --no-daemon --stacktrace assembleRelease
-
-      - name: Find built APKs
-        id: apks
         run: |
-          set -e
-          find . -type f -name "*.apk" | tee apk_list.txt
-          echo "count=$(wc -l < apk_list.txt | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          ./gradlew :android:app:assembleDebug \
+            --stacktrace \
+            --no-daemon
 
-      - name: Upload APK artifacts
-        if: steps.apks.outputs.count != '0'
+      # 6. Disponibilizar APK para download no Actions
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: Aether-Mobile-Ultra-APK-run${{ github.run_number }}
-          path: "**/*.apk"
+          name: nebula-cloud-phone-g15-debug
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          
+
+      # 7. Compilar Release quando for criada uma tag
+      - name: Build Release APK
+        if: startsWith(github.ref, "refs/tags/v")
+        run: |
+          ./gradlew :android:app:assembleRelease \
+            --stacktrace \
+            --no-daemon
+
+      # 8. Disponibilizar Release APK
+      - name: Upload Release APK
+        if: startsWith(github.ref, "refs/tags/v")
+        uses: actions/upload-artifact@v4
+        with:
+          name: nebula-cloud-phone-g15-release
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      # 9. Criar GitHub Release automaticamente
+      - name: Create GitHub Release
+        if: startsWith(github.ref, "refs/tags/v")
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            android/app/build/outputs/apk/release/*.apk
