@@ -32,19 +32,106 @@ jobs:
             "cmake;3.22.1" \
             "ndk;27.2.12479018"
 
+      - name: Prepare NEXORA project
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== CURRENT DIRECTORY ==="
+          pwd
+
+          echo
+          echo "=== ROOT FILES ==="
+          ls -lah
+
+          # If the Android project is already extracted, use it.
+          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+            echo "Android project already exists at repository root."
+            exit 0
+          fi
+
+          # Find the NEXORA 0.6 ZIP.
+          ZIP_FILE=$(find . -maxdepth 2 -type f \
+            \( -name "nexora-minecraft-launcher-mvp-0.6.0*.zip" \
+            -o -name "nexora*.zip" \) \
+            | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: NEXORA ZIP not found."
+            echo
+            echo "ZIP files found:"
+            find . -type f -name "*.zip" -print
+            exit 1
+          fi
+
+          echo "Using NEXORA archive:"
+          echo "$ZIP_FILE"
+
+          mkdir -p _nexora_extract
+
+          echo
+          echo "=== ZIP CONTENTS ==="
+          unzip -l "$ZIP_FILE" | head -100
+
+          echo
+          echo "=== EXTRACTING ==="
+          unzip -q "$ZIP_FILE" -d _nexora_extract
+
+          echo
+          echo "=== SEARCHING FOR GRADLE PROJECT ==="
+
+          SETTINGS_FILE=$(find _nexora_extract -type f \
+            \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
+            | head -n 1)
+
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: settings.gradle(.kts) was not found inside the NEXORA archive."
+            echo
+            echo "Extracted files:"
+            find _nexora_extract -maxdepth 4 -type f | head -200
+            exit 1
+          fi
+
+          PROJECT_ROOT=$(dirname "$SETTINGS_FILE")
+
+          echo "Project root:"
+          echo "$PROJECT_ROOT"
+
+          echo
+          echo "=== COPYING PROJECT TO WORKSPACE ==="
+
+          cp -a "$PROJECT_ROOT"/. .
+
+          echo
+          echo "=== PROJECT ROOT AFTER EXTRACTION ==="
+          ls -lah
+
+          echo
+          echo "=== GRADLE SETTINGS ==="
+          ls -l settings.gradle* || true
+
+          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
+            echo "ERROR: Gradle settings file still missing."
+            exit 1
+          fi
+
       - name: Make scripts executable
         run: |
           find tools -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
       - name: Check project
+        shell: bash
         run: |
+          set -e
+
           echo "=== PROJECT ==="
           pwd
-          ls -la
+          ls -lah
 
           echo
           echo "=== ANDROID MODULES ==="
-          find . -maxdepth 3 -name "build.gradle.kts" -print
+          find . -maxdepth 4 -name "build.gradle.kts" -print
+          find . -maxdepth 4 -name "build.gradle" -print
 
           echo
           echo "=== SETTINGS ==="
@@ -59,7 +146,12 @@ jobs:
 
           echo
           echo "=== VERIFICATION MODULE ==="
-          find android-java-verification -maxdepth 4 -type f | sort
+          if [ -d android-java-verification ]; then
+            find android-java-verification -maxdepth 5 -type f | sort
+          else
+            echo "ERROR: android-java-verification module not found"
+            exit 1
+          fi
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -77,6 +169,7 @@ jobs:
       - name: Show generated APK
         run: |
           echo "=== GENERATED APK ==="
+
           find android-java-verification/build/outputs/apk \
             -type f \
             -name "*.apk" \
