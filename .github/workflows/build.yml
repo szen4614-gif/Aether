@@ -71,34 +71,3 @@ jobs:
           path: app/build/outputs/apk/**/*.apk
           if-no-files-found: ignore
 
-Como usar
-
-Crie exatamente:
-
-.github/
-└── workflows/
-    └── build-apk.yml
-
-Cole o workflow acima, faça commit e envie para o GitHub.
-
-Depois:
-
-GitHub → Actions → Build NEXORA APK → Run workflow
-
-O APK de verificação ficará em Artifacts como:
-
-"nexora-android-java-verification-0.6.0"
-
-Importante
-
-Esse workflow só compila o APK. Ele não transforma o "ANDROID_JAVA_POC" em PASS.
-
-O resultado continua:
-
-"ANDROID_JAVA_POC = NOT VERIFIED"
-
-até o APK ser instalado em um Android ARM64 real, com o runtime JRE 17 correspondente, e completar toda a cadeia:
-
-"libjvm.so → JNI_CreateJavaVM → FindClass → main → 41→42 → DestroyJavaVM".
-
-Esse é exatamente o próximo experimento.
