@@ -34,7 +34,6 @@ jobs:
 
       - name: Make scripts executable
         run: |
-          chmod +x gradlew 2>/dev/null || true
           find tools -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
       - name: Check project
@@ -42,20 +41,46 @@ jobs:
           echo "=== PROJECT ==="
           pwd
           ls -la
+
           echo
           echo "=== ANDROID MODULES ==="
-          find . -maxdepth 2 -name build.gradle.kts -print
+          find . -maxdepth 3 -name "build.gradle.kts" -print
+
+          echo
+          echo "=== SETTINGS ==="
+          if [ -f settings.gradle.kts ]; then
+            cat settings.gradle.kts
+          elif [ -f settings.gradle ]; then
+            cat settings.gradle
+          else
+            echo "ERROR: settings.gradle(.kts) not found"
+            exit 1
+          fi
+
           echo
           echo "=== VERIFICATION MODULE ==="
-          find android-java-verification -maxdepth 3 -type f | sort
+          find android-java-verification -maxdepth 4 -type f | sort
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Check Gradle
+        run: |
+          gradle --version
 
       - name: Build verification APK
         run: |
-          ./gradlew :android-java-verification:assembleDebug --no-daemon
+          gradle :android-java-verification:assembleDebug --no-daemon
 
-      - name: Show APK
+      - name: Show generated APK
         run: |
-          find android-java-verification/build/outputs/apk -type f -name "*.apk" -print
+          echo "=== GENERATED APK ==="
+          find android-java-verification/build/outputs/apk \
+            -type f \
+            -name "*.apk" \
+            -print
 
       - name: Upload verification APK
         uses: actions/upload-artifact@v4
@@ -70,4 +95,3 @@ jobs:
           name: nexora-launcher-0.6.0
           path: app/build/outputs/apk/**/*.apk
           if-no-files-found: ignore
-
