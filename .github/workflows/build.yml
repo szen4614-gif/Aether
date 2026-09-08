@@ -1,81 +1,104 @@
-name: Build Nebula Cloud Phone G15 APK
+name: Build NEXORA APK
 
 on:
   workflow_dispatch:
-
   push:
     branches:
       - main
-      - principal
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
 
 jobs:
   build-apk:
-    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup JDK 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-          cache: gradle
 
-      - name: Setup Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Give Gradle permission
-        run: chmod +x ./gradlew
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;27.2.12479018"
+
+      - name: Make scripts executable
+        run: |
+          chmod +x gradlew 2>/dev/null || true
+          find tools -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
 
       - name: Check project
         run: |
-          echo "=== Projeto ==="
+          echo "=== PROJECT ==="
           pwd
-          echo "=== Arquivos ==="
           ls -la
-          echo "=== Android ==="
-          ls -la android || true
+          echo
+          echo "=== ANDROID MODULES ==="
+          find . -maxdepth 2 -name build.gradle.kts -print
+          echo
+          echo "=== VERIFICATION MODULE ==="
+          find android-java-verification -maxdepth 3 -type f | sort
 
-      - name: Build Debug APK
+      - name: Build verification APK
         run: |
-          ./gradlew :android:app:assembleDebug \
-            --stacktrace \
-            --no-daemon
+          ./gradlew :android-java-verification:assembleDebug --no-daemon
 
-      - name: Upload Debug APK
+      - name: Show APK
+        run: |
+          find android-java-verification/build/outputs/apk -type f -name "*.apk" -print
+
+      - name: Upload verification APK
         uses: actions/upload-artifact@v4
         with:
-          name: nebula-cloud-phone-g15-debug
-          path: android/app/build/outputs/apk/debug/*.apk
+          name: nexora-android-java-verification-0.6.0
+          path: android-java-verification/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
-      - name: Build Release APK
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          ./gradlew :android:app:assembleRelease \
-            --stacktrace \
-            --no-daemon
-
-      - name: Upload Release APK
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Upload production launcher APK if generated
         uses: actions/upload-artifact@v4
         with:
-          name: nebula-cloud-phone-g15-release
-          path: android/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
+          name: nexora-launcher-0.6.0
+          path: app/build/outputs/apk/**/*.apk
+          if-no-files-found: ignore
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: android/app/build/outputs/apk/release/*.apk
+Como usar
+
+Crie exatamente:
+
+.github/
+└── workflows/
+    └── build-apk.yml
+
+Cole o workflow acima, faça commit e envie para o GitHub.
+
+Depois:
+
+GitHub → Actions → Build NEXORA APK → Run workflow
+
+O APK de verificação ficará em Artifacts como:
+
+"nexora-android-java-verification-0.6.0"
+
+Importante
+
+Esse workflow só compila o APK. Ele não transforma o "ANDROID_JAVA_POC" em PASS.
+
+O resultado continua:
+
+"ANDROID_JAVA_POC = NOT VERIFIED"
+
+até o APK ser instalado em um Android ARM64 real, com o runtime JRE 17 correspondente, e completar toda a cadeia:
+
+"libjvm.so → JNI_CreateJavaVM → FindClass → main → 41→42 → DestroyJavaVM".
+
+Esse é exatamente o próximo experimento.
