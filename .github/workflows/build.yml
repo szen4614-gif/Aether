@@ -1,5 +1,5 @@
 name: NEXORA ANDROID JAVA POC
-on: [workflow_dispatch]
+'on': workflow_dispatch:
 jobs: build: runs-on: ubuntu-latest
 steps:
   - name: Checkout
@@ -16,6 +16,7 @@ steps:
       fi
 
       ZIP="$(find . -maxdepth 3 -type f -name '*.zip' | head -n 1)"
+
       if [ -z "$ZIP" ]; then
         echo "ERROR: NEXORA ZIP not found"
         exit 1
@@ -25,6 +26,7 @@ steps:
       unzip -q "$ZIP" -d .build/project
 
       ROOT="$(find .build/project -type f -name 'settings.gradle.kts' -print -quit | xargs -r dirname)"
+
       if [ -z "$ROOT" ]; then
         echo "ERROR: settings.gradle.kts not found"
         exit 1
@@ -51,7 +53,6 @@ steps:
       yes | sdkmanager --licenses >/dev/null || true
 
       sdkmanager \
-        "platform-tools" \
         "platforms;android-35" \
         "build-tools;35.0.0" \
         "cmake;3.22.1" \
