@@ -44,13 +44,11 @@ jobs:
           echo "=== ROOT FILES ==="
           ls -lah
 
-          # If the Android project is already extracted, use it.
           if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
             echo "Android project already exists at repository root."
             exit 0
           fi
 
-          # Find the NEXORA 0.6 ZIP.
           ZIP_FILE=$(find . -maxdepth 2 -type f \
             \( -name "nexora-minecraft-launcher-mvp-0.6.0*.zip" \
             -o -name "nexora*.zip" \) \
@@ -58,8 +56,6 @@ jobs:
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: NEXORA ZIP not found."
-            echo
-            echo "ZIP files found:"
             find . -type f -name "*.zip" -print
             exit 1
           fi
@@ -69,16 +65,7 @@ jobs:
 
           mkdir -p _nexora_extract
 
-          echo
-          echo "=== ZIP CONTENTS ==="
-          unzip -l "$ZIP_FILE" | head -100
-
-          echo
-          echo "=== EXTRACTING ==="
           unzip -q "$ZIP_FILE" -d _nexora_extract
-
-          echo
-          echo "=== SEARCHING FOR GRADLE PROJECT ==="
 
           SETTINGS_FILE=$(find _nexora_extract -type f \
             \( -name "settings.gradle.kts" -o -name "settings.gradle" \) \
@@ -86,9 +73,7 @@ jobs:
 
           if [ -z "$SETTINGS_FILE" ]; then
             echo "ERROR: settings.gradle(.kts) was not found inside the NEXORA archive."
-            echo
-            echo "Extracted files:"
-            find _nexora_extract -maxdepth 4 -type f | head -200
+            find _nexora_extract -maxdepth 5 -type f | head -200
             exit 1
           fi
 
@@ -97,23 +82,11 @@ jobs:
           echo "Project root:"
           echo "$PROJECT_ROOT"
 
-          echo
-          echo "=== COPYING PROJECT TO WORKSPACE ==="
-
           cp -a "$PROJECT_ROOT"/. .
 
           echo
-          echo "=== PROJECT ROOT AFTER EXTRACTION ==="
+          echo "=== PROJECT ROOT ==="
           ls -lah
-
-          echo
-          echo "=== GRADLE SETTINGS ==="
-          ls -l settings.gradle* || true
-
-          if [ ! -f "settings.gradle.kts" ] && [ ! -f "settings.gradle" ]; then
-            echo "ERROR: Gradle settings file still missing."
-            exit 1
-          fi
 
       - name: Make scripts executable
         run: |
@@ -156,7 +129,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.7'
+          gradle-version: '8.9.11'
 
       - name: Check Gradle
         run: |
@@ -169,7 +142,6 @@ jobs:
       - name: Show generated APK
         run: |
           echo "=== GENERATED APK ==="
-
           find android-java-verification/build/outputs/apk \
             -type f \
             -name "*.apk" \
