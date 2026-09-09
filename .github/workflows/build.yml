@@ -63,6 +63,7 @@ jobs:
           echo "Using NEXORA archive:"
           echo "$ZIP_FILE"
 
+          rm -rf _nexora_extract
           mkdir -p _nexora_extract
 
           unzip -q "$ZIP_FILE" -d _nexora_extract
@@ -125,6 +126,31 @@ jobs:
             echo "ERROR: android-java-verification module not found"
             exit 1
           fi
+
+      - name: Fix Android JNI compatibility
+        shell: bash
+        run: |
+          set -e
+
+          FILE="android-java-verification/src/main/cpp/verification_bridge.cpp"
+
+          if [ ! -f "$FILE" ]; then
+            echo "ERROR: verification_bridge.cpp not found"
+            exit 1
+          fi
+
+          echo "Checking JNI_VERSION_1_8..."
+
+          if grep -q "JNI_VERSION_1_8" "$FILE"; then
+            sed -i 's/JNI_VERSION_1_8/0x00010008/g' "$FILE"
+            echo "JNI_VERSION_1_8 replaced with JNI 1.8 numeric constant."
+          else
+            echo "No JNI_VERSION_1_8 occurrence found."
+          fi
+
+          echo
+          echo "=== JNI VM INITIALIZATION LINE ==="
+          grep -n "vmArgs.version" "$FILE" || true
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
