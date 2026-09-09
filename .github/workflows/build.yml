@@ -1,5 +1,5 @@
 name: NEXORA ANDROID JAVA POC
-on: workflow_dispatch:
+on: [workflow_dispatch]
 jobs: build: runs-on: ubuntu-latest
 steps:
   - name: Checkout
@@ -10,82 +10,132 @@ steps:
     run: |
       set -euo pipefail
 
-      if [ -f settings.gradle.kts ]; then
+      if [ -f "settings.gradle.kts" ]; then
+        echo "Project already at repository root"
         exit 0
       fi
 
       ZIP="$(find . -maxdepth 3 -type f -name '*.zip' | head -n 1)"
-      test -n "$ZIP"
+      if [ -z "$ZIP" ]; then
+        echo "ERROR: NEXORA ZIP not found"
+        exit 1
+      fi
 
       mkdir -p .build/project
       unzip -q "$ZIP" -d .build/project
 
-      ROOT="$(find .build/project -name settings.gradle.kts -print -quit | xargs -r dirname)"
-      test -n "$ROOT"
+      ROOT="$(find .build/project -type f -name 'settings.gradle.kts' -print -quit | xargs -r dirname)"
+      if [ -z "$ROOT" ]; then
+        echo "ERROR: settings.gradle.kts not found"
+        exit 1
+      fi
 
       cp -a "$ROOT"/. .
 
-  - name: Java 17
+      test -f "settings.gradle.kts"
+
+  - name: Setup Java 17
     uses: actions/setup-java@v5
     with:
       distribution: temurin
-      java-version: '17'
+      java-version: "17"
 
-  - name: Android SDK
+  - name: Setup Android SDK
     uses: android-actions/setup-android@v4
 
-  - name: SDK packages
-    run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;27.2.12479018"
+  - name: Install Android SDK packages
+    shell: bash
+    run: |
+      set -euo pipefail
 
-  - name: Gradle 8.9
+      yes | sdkmanager --licenses >/dev/null || true
+
+      sdkmanager \
+        "platform-tools" \
+        "platforms;android-35" \
+        "build-tools;35.0.0" \
+        "cmake;3.22.1" \
+        "ndk;27.2.12479018"
+
+  - name: Setup Gradle
     uses: gradle/actions/setup-gradle@v6
     with:
-      gradle-version: '8.9'
+      gradle-version: "8.9"
 
-  - name: Download JRE
+  - name: Check project
     shell: bash
     run: |
       set -euo pipefail
 
-      mkdir -p .build/runtime
+      test -f "settings.gradle.kts"
+      test -d "android-java-verification"
+      test -f "android-java-verification/build.gradle.kts"
+      test -f "android-java-verification/src/main/cpp/CMakeLists.txt"
 
-      curl -L --fail --retry 3 \
+      echo "Project structure OK"
+
+  - name: Download Android OpenJDK 17 ARM64
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      mkdir -p ".build/runtime"
+
+      curl \
+        --fail \
+        --location \
+        --retry 5 \
+        --retry-delay 2 \
+        --connect-timeout 30 \
+        --max-time 300 \
         "https://github.com/AngelAuraMC/angelauramc-openjdk-build/releases/download/release/jre17-android-arm64.tar.xz" \
-        -o .build/runtime/jre.tar.xz
+        --output ".build/runtime/jre17-android-arm64.tar.xz"
 
-      echo "e162c860fe05ee4a4e4af7606437419879f6c748386a7b09fa77d10db6a64091  .build/runtime/jre.tar.xz" \
+      echo "e162c860fe05ee4a4e4af7606437419879f6c748386a7b09fa77d10db6a64091  .build/runtime/jre17-android-arm64.tar.xz" \
         | sha256sum -c -
 
-  - name: Extract JRE
+  - name: Extract Android OpenJDK 17
     shell: bash
     run: |
       set -euo pipefail
 
-      rm -rf .build/runtime/jre17-android-arm64
-      mkdir -p .build/runtime/jre17-android-arm64
+      rm -rf ".build/runtime/jre17-android-arm64"
 
-      tar -xJf \
-        .build/runtime/jre.tar.xz \
-        -C .build/runtime/jre17-android-arm64 \
+      mkdir -p ".build/runtime/jre17-android-arm64"
+
+      tar \
+        -xJf ".build/runtime/jre17-android-arm64.tar.xz" \
+        -C ".build/runtime/jre17-android-arm64" \
         --strip-components=1
 
-      test -f .build/runtime/jre17-android-arm64/release
+      test -f ".build/runtime/jre17-android-arm64/release"
+
+      echo "JRE extracted successfully"
 
   - name: Prepare native runtime
     shell: bash
     run: |
       set -euo pipefail
 
-      chmod +x tools/runtime-inspect/prepare-apk-runtime.sh
+      chmod +x "tools/runtime-inspect/prepare-apk-runtime.sh"
 
       ./tools/runtime-inspect/prepare-apk-runtime.sh \
-        .build/runtime/jre17-android-arm64
+        ".build/runtime/jre17-android-arm64"
 
       test -f \
-        android-java-verification/src/main/jniLibs/arm64-v8a/libjvm.so
+        "android-java-verification/src/main/jniLibs/arm64-v8a/libjvm.so"
 
-  - name: Build APK
-    run: gradle :android-java-verification:assembleDebug --no-daemon --stacktrace
+      echo "libjvm.so prepared successfully"
+
+  - name: Build Android Java POC APK
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      gradle \
+        :android-java-verification:assembleDebug \
+        --no-daemon \
+        --stacktrace
 
   - name: Verify APK
     shell: bash
@@ -98,7 +148,8 @@ steps:
 
       unzip -l "$APK" | grep -q "lib/arm64-v8a/libjvm.so"
 
-      echo "APK verified: $APK"
+      echo "APK exists: $APK"
+      echo "libjvm.so found inside APK"
 
   - name: Upload APK
     uses: actions/upload-artifact@v4
