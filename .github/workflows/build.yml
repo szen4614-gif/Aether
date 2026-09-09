@@ -1,366 +1,237 @@
-name: Build NEXORA APK
-
-on:
-  push:
-    branches:
-      - main
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-env:
-  JAVA_VERSION: "17"
-  ANDROID_API: "35"
-  BUILD_TOOLS: "35.0.0"
-  CMAKE_VERSION: "3.22.1"
-  NDK_VERSION: "27.2.12479018"
-
-  RUNTIME_URL: "https://github.com/AngelAuraMC/angelauramc-openjdk-build/releases/download/release/jre17-android-arm64.tar.xz"
-  RUNTIME_SHA256: "e162c860fe05ee4a4e4af7606437419879f6c748386a7b09fa77d10db6a64091"
-
-jobs:
-  build-apk:
-    name: Build verification APK
-    runs-on: ubuntu-24.04
-
-    steps:
-
-      # ------------------------------------------------------------
-      # 1. SOURCE
-      # ------------------------------------------------------------
-
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      # ------------------------------------------------------------
-      # 2. ANDROID TOOLCHAIN
-      # ------------------------------------------------------------
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-
-          sdkmanager --install \
-            "platform-tools" \
-            "platforms;android-${ANDROID_API}" \
-            "build-tools;${BUILD_TOOLS}" \
-            "cmake;${CMAKE_VERSION}" \
-            "ndk;${NDK_VERSION}"
-
-      # ------------------------------------------------------------
-      # 3. GRADLE
-      #
-      # Não depende de ./gradlew.
-      # O repositório 0.6 não possui wrapper completo.
-      # AGP 8.7.3 exige Gradle >= 8.9.
-      # ------------------------------------------------------------
-
-      - name: Set up Gradle 8.9
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-
-      - name: Check Gradle
-        run: |
-          gradle --version
-
-      # ------------------------------------------------------------
-      # 4. PROJECT CHECK
-      # ------------------------------------------------------------
-
-      - name: Check project
-        run: |
-          set -e
-
-          echo "=== PROJECT ==="
-          pwd
-          ls -la
-
-          echo
-          echo "=== SETTINGS ==="
-          test -f settings.gradle.kts
-          cat settings.gradle.kts
-
-          echo
-          echo "=== ANDROID VERIFICATION MODULE ==="
-          test -f android-java-verification/build.gradle.kts
-          test -f android-java-verification/src/main/AndroidManifest.xml
-          test -f android-java-verification/src/main/cpp/CMakeLists.txt
-          test -f android-java-verification/src/main/cpp/verification_bridge.cpp
-          test -f android-java-verification/src/main/cpp/verification_native.cpp
-
-      # ------------------------------------------------------------
-      # 5. GET REAL ANDROID OPENJDK 17 ARM64
-      # ------------------------------------------------------------
-
-      - name: Download Android OpenJDK 17 ARM64
-        run: |
-          set -euo pipefail
-
-          mkdir -p .build/runtime
-          cd .build/runtime
-
-          echo "Downloading:"
-          echo "$RUNTIME_URL"
-
-          curl \
-            --fail \
-            --location \
-            --retry 5 \
-            --retry-delay 5 \
-            --connect-timeout 30 \
-            --max-time 600 \
-            -o jre17-android-arm64.tar.xz \
-            "$RUNTIME_URL"
-
-          echo
-          echo "=== RUNTIME FILE ==="
-          ls -lh jre17-android-arm64.tar.xz
-
-      # ------------------------------------------------------------
-      # 6. VERIFY REAL RUNTIME INTEGRITY
-      # ------------------------------------------------------------
-
-      - name: Verify JRE SHA-256
-        run: |
-          set -euo pipefail
-
-          cd .build/runtime
-
-          echo "${RUNTIME_SHA256}  jre17-android-arm64.tar.xz" \
-            | sha256sum -c -
-
-          echo "RUNTIME_INTEGRITY_VERIFIED=PASS"
-
-      # ------------------------------------------------------------
-      # 7. EXTRACT JRE
-      # ------------------------------------------------------------
-
-      - name: Extract JRE
-        run: |
-          set -euo pipefail
-
-          rm -rf .build/runtime/jre17-android-arm64
-          mkdir -p .build/runtime/jre17-android-arm64
-
-          tar \
-            -xJf .build/runtime/jre17-android-arm64.tar.xz \
-            -C .build/runtime/jre17-android-arm64 \
-            --strip-components=1
-
-          echo "=== RUNTIME ROOT ==="
-          find .build/runtime/jre17-android-arm64 \
-            -maxdepth 2 \
-            -type f \
-            | sort \
-            | head -100
-
-      # ------------------------------------------------------------
-      # 8. VERIFY JRE STRUCTURE
-      # ------------------------------------------------------------
-
-      - name: Verify JRE structure
-        run: |
-          set -euo pipefail
-
-          RUNTIME_HOME="$PWD/.build/runtime/jre17-android-arm64"
-
-          test -f "$RUNTIME_HOME/release"
-
-          if test -f "$RUNTIME_HOME/lib/server/libjvm.so"; then
-            JVM="$RUNTIME_HOME/lib/server/libjvm.so"
-          elif test -f "$RUNTIME_HOME/lib/aarch64/server/libjvm.so"; then
-            JVM="$RUNTIME_HOME/lib/aarch64/server/libjvm.so"
-          elif test -f "$RUNTIME_HOME/lib/libjvm.so"; then
-            JVM="$RUNTIME_HOME/lib/libjvm.so"
-          else
-            echo "ERROR: libjvm.so not found"
-            exit 1
-          fi
-
-          echo "JVM=$JVM"
-
-          file "$JVM"
-          readelf -h "$JVM" | grep -E "Class:|Machine:"
-
-          MACHINE="$(readelf -h "$JVM" | sed -n 's/^ *Machine: *//p')"
-
-          case "$MACHINE" in
-            *AArch64*|*ARM64*)
-              echo "RUNTIME_ABI=PASS:AArch64"
-              ;;
-            *)
-              echo "RUNTIME_ABI=FAIL:$MACHINE"
-              exit 1
-              ;;
-          esac
-
-          echo "JAVA_VERSION:"
-          grep 'JAVA_VERSION' "$RUNTIME_HOME/release" || true
-
-      # ------------------------------------------------------------
-      # 9. PREPARE NATIVE JRE LIBRARIES FOR APK
-      #
-      # This is the critical fix for:
-      #
-      # LIBJVM=FAIL:not found in APK nativeLibraryDir
-      # ------------------------------------------------------------
-
-      - name: Prepare APK native runtime
-        run: |
-          set -euo pipefail
-
-          chmod +x tools/runtime-inspect/prepare-apk-runtime.sh
-
-          export NEXORA_RUNTIME_HOME="$PWD/.build/runtime/jre17-android-arm64"
-
-          tools/runtime-inspect/prepare-apk-runtime.sh \
-            "$NEXORA_RUNTIME_HOME"
-
-          echo
-          echo "=== APK JNI LIBRARIES ==="
-          find android-java-verification/src/main/jniLibs/arm64-v8a \
-            -maxdepth 1 \
-            -type f \
-            -printf '%f\n' \
-            | sort
-
-          echo
-          echo "=== LIBJVM ==="
-          test -f \
-            android-java-verification/src/main/jniLibs/arm64-v8a/libjvm.so
-
-          ls -lh \
-            android-java-verification/src/main/jniLibs/arm64-v8a/libjvm.so
-
-      # ------------------------------------------------------------
-      # 10. SHOW NATIVE MANIFEST
-      # ------------------------------------------------------------
-
-      - name: Show runtime native manifest
-        run: |
-          cat \
-            android-java-verification/src/main/jniLibs/runtime-native-manifest.txt
-
-      # ------------------------------------------------------------
-      # 11. BUILD APK
-      # ------------------------------------------------------------
-
-      - name: Build verification APK
-        run: |
-          set -euo pipefail
-
-          gradle \
-            :android-java-verification:assembleDebug \
-            --no-daemon \
-            --stacktrace
-
-      # ------------------------------------------------------------
-      # 12. VERIFY APK CONTENTS
-      # ------------------------------------------------------------
-
-      - name: Verify generated APK
-        run: |
-          set -euo pipefail
-
-          APK="$(find \
-            android-java-verification/build/outputs/apk/debug \
-            -maxdepth 1 \
-            -type f \
-            -name '*.apk' \
-            | head -1)"
-
-          test -n "$APK"
-          test -f "$APK"
-
-          echo "APK=$APK"
-          ls -lh "$APK"
-
-          echo
-          echo "=== APK LIBJVM CHECK ==="
-
-          unzip -l "$APK" \
-            | grep 'lib/arm64-v8a/libjvm.so'
-
-          echo
-          echo "=== APK NATIVE LIBRARIES ==="
-
-          unzip -l "$APK" \
-            | grep 'lib/arm64-v8a/' \
-            | head -100
-
-          echo
-          echo "=== APK INTEGRITY ==="
-
-          sha256sum "$APK"
-
-      # ------------------------------------------------------------
-      # 13. UPLOAD VERIFICATION APK
-      # ------------------------------------------------------------
-
-      - name: Upload verification APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: nexora-android-java-verification-0.6.0
-          path: android-java-verification/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-
-      # ------------------------------------------------------------
-      # 14. UPLOAD RUNTIME EVIDENCE
-      # ------------------------------------------------------------
-
-      - name: Upload runtime preparation evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: nexora-android-java-runtime-evidence-0.6.0
-          path: |
-            android-java-verification/src/main/jniLibs/runtime-native-manifest.txt
-            .build/runtime/jre17-android-arm64/release
-          if-no-files-found: error
-
-      # ------------------------------------------------------------
-      # 15. FINAL BUILD STATUS
-      # ------------------------------------------------------------
-
-      - name: Build summary
-        run: |
-          echo "========================================"
-          echo "NEXORA 0.6 ANDROID JAVA VERIFICATION"
-          echo "========================================"
-          echo
-          echo "SOURCE=PASS"
-          echo "RUNTIME_ACQUIRED=PASS"
-          echo "RUNTIME_INTEGRITY_VERIFIED=PASS"
-          echo "RUNTIME_STRUCTURE_VERIFIED=PASS"
-          echo "APK_BUILD=PASS"
-          echo "APK_LIBJVM_PRESENT=PASS"
-          echo
-          echo "ANDROID_JAVA_POC=NOT_VERIFIED"
-          echo
-          echo "IMPORTANT:"
-          echo "APK build success does NOT promote"
-          echo "ANDROID_JAVA_POC to PASS."
-          echo
-          echo "The actual gate still requires:"
-          echo
-          echo "Android ARM64"
-          echo " -> APK"
-          echo " -> libjvm.so"
-          echo " -> JNI_CreateJavaVM"
-          echo " -> FindClass"
-          echo " -> HelloWorld.main()"
-          echo " -> Java -> native"
-          echo " -> 41 -> 42"
-          echo " -> DestroyJavaVM"
-          echo
-          echo "========================================"
+name: NEXORA ANDROID JAVA POC
+on: workflow_dispatch:
+jobs: build-android-java-poc: runs-on: ubuntu-latest
+steps:
+  - name: Checkout
+    uses: actions/checkout@v4
+
+  - name: Prepare NEXORA project
+    shell: bash
+    run: |
+      set -euo pipefail
+      if [ -f settings.gradle.kts ]; then
+        echo "Project already at repository root."
+        exit 0
+      fi
+
+      ZIP="$(find . -maxdepth 3 -type f -name '*.zip' | head -n 1)"
+      if [ -z "$ZIP" ]; then
+        echo "NEXORA project ZIP not found."
+        exit 1
+      fi
+
+      mkdir -p .build/project
+      unzip -q "$ZIP" -d .build/project
+
+      ROOT="$(find .build/project -name settings.gradle.kts -print -quit | xargs -r dirname)"
+      if [ -z "$ROOT" ]; then
+        echo "settings.gradle.kts not found after extraction."
+        exit 1
+      fi
+
+      cp -a "$ROOT"/. .
+      echo "Prepared project from: $ROOT"
+
+  - name: Set up JDK 17
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: '17'
+
+  - name: Set up Android SDK
+    uses: android-actions/setup-android@v3
+
+  - name: Install Android SDK components
+    run: |
+      sdkmanager "platform-tools" \
+        "platforms;android-35" \
+        "build-tools;35.0.0" \
+        "cmake;3.22.1" \
+        "ndk;27.2.12479018"
+
+  - name: Set up Gradle 8.9
+    uses: gradle/actions/setup-gradle@v4
+    with:
+      gradle-version: '8.9'
+
+  - name: Verify toolchain
+    run: |
+      java -version
+      gradle --version
+      adb version || true
+      cmake --version
+      ls -la "$ANDROID_HOME/ndk/27.2.12479018"
+
+  - name: Download Android OpenJDK 17 ARM64
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      mkdir -p .build/runtime
+
+      URL="https://github.com/AngelAuraMC/angelauramc-openjdk-build/releases/download/release/jre17-android-arm64.tar.xz"
+      FILE=".build/runtime/jre17-android-arm64.tar.xz"
+      EXPECTED="e162c860fe05ee4a4e4af7606437419879f6c748386a7b09fa77d10db6a64091"
+
+      curl -L --fail --retry 3 "$URL" -o "$FILE"
+
+      ACTUAL="$(sha256sum "$FILE" | awk '{print $1}')"
+
+      echo "Expected SHA-256: $EXPECTED"
+      echo "Actual SHA-256:   $ACTUAL"
+
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        echo "Runtime SHA-256 mismatch."
+        exit 1
+      fi
+
+      echo "Runtime SHA-256 verified."
+
+  - name: Extract Android OpenJDK 17 ARM64
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      rm -rf .build/runtime/jre17-android-arm64
+      mkdir -p .build/runtime/jre17-android-arm64
+
+      tar -xJf \
+        .build/runtime/jre17-android-arm64.tar.xz \
+        -C .build/runtime/jre17-android-arm64 \
+        --strip-components=1
+
+      test -f .build/runtime/jre17-android-arm64/release
+
+      echo "Runtime extracted:"
+      find .build/runtime/jre17-android-arm64 -maxdepth 2 -type f | sort | head -100
+
+  - name: Verify runtime structure
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      RUNTIME=".build/runtime/jre17-android-arm64"
+
+      test -f "$RUNTIME/release"
+
+      if [ -f "$RUNTIME/lib/server/libjvm.so" ]; then
+        JVM="$RUNTIME/lib/server/libjvm.so"
+      elif [ -f "$RUNTIME/lib/aarch64/server/libjvm.so" ]; then
+        JVM="$RUNTIME/lib/aarch64/server/libjvm.so"
+      elif [ -f "$RUNTIME/lib/libjvm.so" ]; then
+        JVM="$RUNTIME/lib/libjvm.so"
+      else
+        echo "libjvm.so not found."
+        exit 1
+      fi
+
+      echo "libjvm=$JVM"
+
+      file "$JVM"
+
+      if ! file "$JVM" | grep -qi 'ARM aarch64'; then
+        echo "libjvm.so is not AArch64."
+        exit 1
+      fi
+
+      echo "Runtime structure verified."
+
+  - name: Prepare runtime native libraries for APK
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      chmod +x tools/runtime-inspect/prepare-apk-runtime.sh
+
+      ./tools/runtime-inspect/prepare-apk-runtime.sh \
+        .build/runtime/jre17-android-arm64
+
+  - name: Verify prepared APK runtime
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      DEST="android-java-verification/src/main/jniLibs/arm64-v8a"
+
+      test -d "$DEST"
+      test -f "$DEST/libjvm.so"
+      test -f "$DEST/runtime-native-manifest.txt"
+
+      echo "Prepared native libraries:"
+      find "$DEST" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      echo "libjvm.so:"
+      file "$DEST/libjvm.so"
+
+  - name: Build Android Java POC APK
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      gradle \
+        :android-java-verification:assembleDebug \
+        --no-daemon \
+        --stacktrace
+
+  - name: Verify APK contains ARM64 libjvm
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      APK="android-java-verification/build/outputs/apk/debug/android-java-verification-debug.apk"
+
+      test -f "$APK"
+
+      echo "APK: $APK"
+
+      unzip -l "$APK" | grep 'lib/arm64-v8a/libjvm.so'
+
+      echo "ARM64 libjvm.so is packaged in APK."
+
+  - name: Generate runtime evidence
+    shell: bash
+    run: |
+      set -euo pipefail
+
+      mkdir -p .build/evidence
+
+      sha256sum \
+        .build/runtime/jre17-android-arm64.tar.xz \
+        > .build/evidence/runtime-download.sha256
+
+      find \
+        android-java-verification/src/main/jniLibs/arm64-v8a \
+        -maxdepth 1 \
+        -type f \
+        -exec sha256sum {} \; \
+        | sort \
+        > .build/evidence/prepared-native-sha256.txt
+
+      unzip -l \
+        android-java-verification/build/outputs/apk/debug/android-java-verification-debug.apk \
+        > .build/evidence/apk-contents.txt
+
+      cat > .build/evidence/ANDROID_JAVA_POC_STATUS.txt <<'EOF'
+ANDROID_JAVA_POC=NOT_VERIFIED
+Reason: The APK build and runtime packaging were verified in CI, but the actual ANDROID_JAVA_POC gate requires execution on a real ARM64 Android device.
+Required execution sequence:
+APK → native bridge → Android OpenJDK 17 ARM64 → JNI_CreateJavaVM → HelloWorld.main() → Java→native→41→42 → result → DestroyJavaVM
+Compilation, APK packaging, ELF inspection, SHA-256 verification, or CI execution do NOT promote ANDROID_JAVA_POC to PASS. EOF
+- name: Upload Android Java POC APK
+    uses: actions/upload-artifact@v4
+    with:
+      name: nexora-android-java-poc-0.6.0
+      path: android-java-verification/build/outputs/apk/debug/android-java-verification-debug.apk
+      if-no-files-found: error
+
+  - name: Upload runtime evidence
+    uses: actions/upload-artifact@v4
+    with:
+      name: nexora-android-java-poc-runtime-evidence
+      path: .build/evidence/
+      if-no-files-found: error
+
+  - name: Final gate status
+    run: |
+      echo "ANDROID_JAVA_POC = NOT VERIFIED"
+      echo "CI build success does not promote the device execution gate."
