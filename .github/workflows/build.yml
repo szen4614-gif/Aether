@@ -36,29 +36,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Android SDK
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;28.0.13004108 cmake;3.22.1"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Prepare Gradle
         run: |
           set -e
-
-          echo "ANDROID_HOME=${ANDROID_HOME}"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
-
-          yes | sdkmanager --licenses >/dev/null || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "ndk;28.0.13004108" \
-            "cmake;3.22.1"
-
-      - name: Gradle
-        uses: gradle/actions/setup-gradle@v6
-
-      - name: Wrapper
-        run: |
           test -f ./gradlew
-          test -f ./gradle/wrapper/gradle-wrapper.properties
           chmod +x ./gradlew
 
       - name: Build
@@ -71,7 +58,7 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      - name: Validate Debug APK
+      - name: Validate APK
         shell: bash
         run: |
           set -e
@@ -83,15 +70,13 @@ jobs:
 
           test -n "$APK"
 
-          echo "APK: $APK"
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
           "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
             -c \
             -P 16 \
             -v 4 \
             "$APK"
-
-          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
       - name: Validate native libraries
         shell: bash
@@ -115,25 +100,22 @@ jobs:
             unzip -Z1 "$APK_PATH" | grep '\.so$' || true
           )
 
-      - name: Upload Debug APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: NOVA-N10-Debug
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: NOVA-N10-Release
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload reports
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: NOVA-N10-Reports
           path: |
