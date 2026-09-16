@@ -41,20 +41,12 @@ jobs:
           packages: "platform-tools platforms;android-35 build-tools;35.0.0 ndk;28.0.13004108 cmake;3.22.1"
 
       - uses: gradle/actions/setup-gradle@v6
-
-      - name: Prepare Gradle
-        run: |
-          set -e
-          test -f ./gradlew
-          chmod +x ./gradlew
+        with:
+          gradle-version: "8.9"
 
       - name: Build
         run: |
-          ./gradlew \
-            clean \
-            testDebugUnitTest \
-            assembleDebug \
-            assembleRelease \
+          gradle clean testDebugUnitTest assembleDebug assembleRelease \
             --no-daemon \
             --stacktrace
 
