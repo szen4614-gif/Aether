@@ -1,160 +1,113 @@
-name: NEXORA ANDROID JAVA POC
-'on': workflow_dispatch:
-jobs: build: runs-on: ubuntu-latest
-steps:
-  - name: Checkout
-    uses: actions/checkout@v6
+name: NOVA N10
 
-  - name: Prepare project
-    shell: bash
-    run: |
-      set -euo pipefail
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
 
-      if [ -f "settings.gradle.kts" ]; then
-        echo "Project already at repository root"
-        exit 0
-      fi
+permissions:
+  contents: read
 
-      ZIP="$(find . -maxdepth 3 -type f -name '*.zip' | head -n 1)"
+concurrency:
+  group: nova-n10-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
-      if [ -z "$ZIP" ]; then
-        echo "ERROR: NEXORA ZIP not found"
-        exit 1
-      fi
+env:
+  JAVA_VERSION: "17"
+  ANDROID_API: "35"
+  BUILD_TOOLS: "35.0.0"
+  NDK_VERSION: "28.0.13004108"
+  CMAKE_VERSION: "3.22.1"
 
-      mkdir -p .build/project
-      unzip -q "$ZIP" -d .build/project
+jobs:
+  build:
+    runs-on: ubuntu-22.04
 
-      ROOT="$(find .build/project -type f -name 'settings.gradle.kts' -print -quit | xargs -r dirname)"
+    steps:
+      - uses: actions/checkout@v4
 
-      if [ -z "$ROOT" ]; then
-        echo "ERROR: settings.gradle.kts not found"
-        exit 1
-      fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-      cp -a "$ROOT"/. .
+      - uses: android-actions/setup-android@v4
 
-      test -f "settings.gradle.kts"
+      - name: Install dependencies
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;28.0.13004108" \
+            "cmake;3.22.1"
 
-  - name: Setup Java 17
-    uses: actions/setup-java@v5
-    with:
-      distribution: temurin
-      java-version: "17"
+      - name: Configure Gradle
+        run: chmod +x ./gradlew
 
-  - name: Setup Android SDK
-    uses: android-actions/setup-android@v4
+      - uses: gradle/actions/wrapper-validation@v6
 
-  - name: Install Android SDK packages
-    shell: bash
-    run: |
-      set -euo pipefail
+      - uses: gradle/actions/setup-gradle@v6
 
-      yes | sdkmanager --licenses >/dev/null || true
+      - name: Build
+        run: ./gradlew clean testDebugUnitTest assembleDebug assembleRelease --no-daemon --stacktrace
 
-      sdkmanager \
-        "platforms;android-35" \
-        "build-tools;35.0.0" \
-        "cmake;3.22.1" \
-        "ndk;27.2.12479018"
+      - name: Validate APK
+        shell: bash
+        run: |
+          set -euo pipefail
 
-  - name: Setup Gradle
-    uses: gradle/actions/setup-gradle@v6
-    with:
-      gradle-version: "8.9"
+          APK=$(find app/build/outputs/apk/debug -type f -name "*.apk" -print -quit)
 
-  - name: Check project
-    shell: bash
-    run: |
-      set -euo pipefail
+          if [ -z "$APK" ]; then
+            exit 1
+          fi
 
-      test -f "settings.gradle.kts"
-      test -d "android-java-verification"
-      test -f "android-java-verification/build.gradle.kts"
-      test -f "android-java-verification/src/main/cpp/CMakeLists.txt"
+          "$ANDROID_HOME/build-tools/35.0.0/zipalign" \
+            -c -P 16 -v 4 "$APK"
 
-      echo "Project structure OK"
+      - name: Native validation
+        shell: bash
+        run: |
+          set -euo pipefail
 
-  - name: Download Android OpenJDK 17 ARM64
-    shell: bash
-    run: |
-      set -euo pipefail
+          READ_ELF="$ANDROID_HOME/ndk/28.0.13004108/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
 
-      mkdir -p ".build/runtime"
+          mkdir -p build/elf-check
 
-      curl \
-        --fail \
-        --location \
-        --retry 5 \
-        --retry-delay 2 \
-        --connect-timeout 30 \
-        --max-time 300 \
-        "https://github.com/AngelAuraMC/angelauramc-openjdk-build/releases/download/release/jre17-android-arm64.tar.xz" \
-        --output ".build/runtime/jre17-android-arm64.tar.xz"
+          while IFS= read -r LIB; do
+            NAME=$(basename "$LIB")
+            unzip -p "$APK" "$LIB" > "build/elf-check/$NAME"
+            "$READ_ELF" -l "build/elf-check/$NAME"
+          done < <(unzip -Z1 "$APK" | grep '\.so$' || true)
 
-      echo "e162c860fe05ee4a4e4af7606437419879f6c748386a7b09fa77d10db6a64091  .build/runtime/jre17-android-arm64.tar.xz" \
-        | sha256sum -c -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-N10-Debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
 
-  - name: Extract Android OpenJDK 17
-    shell: bash
-    run: |
-      set -euo pipefail
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NOVA-N10-Release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
 
-      rm -rf ".build/runtime/jre17-android-arm64"
-
-      mkdir -p ".build/runtime/jre17-android-arm64"
-
-      tar \
-        -xJf ".build/runtime/jre17-android-arm64.tar.xz" \
-        -C ".build/runtime/jre17-android-arm64" \
-        --strip-components=1
-
-      test -f ".build/runtime/jre17-android-arm64/release"
-
-      echo "JRE extracted successfully"
-
-  - name: Prepare native runtime
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      chmod +x "tools/runtime-inspect/prepare-apk-runtime.sh"
-
-      ./tools/runtime-inspect/prepare-apk-runtime.sh \
-        ".build/runtime/jre17-android-arm64"
-
-      test -f \
-        "android-java-verification/src/main/jniLibs/arm64-v8a/libjvm.so"
-
-      echo "libjvm.so prepared successfully"
-
-  - name: Build Android Java POC APK
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      gradle \
-        :android-java-verification:assembleDebug \
-        --no-daemon \
-        --stacktrace
-
-  - name: Verify APK
-    shell: bash
-    run: |
-      set -euo pipefail
-
-      APK="android-java-verification/build/outputs/apk/debug/android-java-verification-debug.apk"
-
-      test -f "$APK"
-
-      unzip -l "$APK" | grep -q "lib/arm64-v8a/libjvm.so"
-
-      echo "APK exists: $APK"
-      echo "libjvm.so found inside APK"
-
-  - name: Upload APK
-    uses: actions/upload-artifact@v4
-    with:
-      name: nexora-android-java-poc-0.6.0
-      path: android-java-verification/build/outputs/apk/debug/android-java-verification-debug.apk
-      if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: NOVA-N10-Reports
+          path: |
+            app/build/reports/**
+            app/build/test-results/**
+            build/**
+          if-no-files-found: ignore
+          retention-days: 30
