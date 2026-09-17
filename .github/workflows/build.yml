@@ -45,7 +45,6 @@ jobs:
 
           echo "Repository:"
           pwd
-          find . -maxdepth 3 -type f | sort | head -300
 
           PROJECT_DIR=""
 
@@ -57,35 +56,40 @@ jobs:
             if [ -f "./NOVA_N10_VALIDATION_UPGRADED.zip" ]; then
               ZIP="./NOVA_N10_VALIDATION_UPGRADED.zip"
             else
-              ZIP="$(find . -maxdepth 3 -type f \
-                \( -iname 'NOVA_N10_VALIDATION_UPGRADED.zip' \
-                -o -iname 'NOVA_N10*.zip' \
-                -o -iname 'N10*.zip' \) \
+              ZIP="$(find . -maxdepth 4 -type f \
+                \( \
+                  -iname 'NOVA_N10_VALIDATION_UPGRADED.zip' \
+                  -o -iname 'NOVA_N10*.zip' \
+                  -o -iname 'N10*.zip' \
+                \) \
                 | head -n 1)"
             fi
 
             if [ -z "${ZIP}" ]; then
-              echo "::error::NOVA N10 ZIP não encontrado no repositório."
-              echo "Arquivos ZIP encontrados:"
+              echo "::error::NOVA N10 ZIP não encontrado."
               find . -type f -iname "*.zip" -print
               exit 1
             fi
 
-            echo "ZIP selecionado: ${ZIP}"
+            echo "ZIP selecionado:"
+            echo "${ZIP}"
 
             rm -rf .nova_n10_source
             mkdir -p .nova_n10_source
 
             unzip -q "${ZIP}" -d .nova_n10_source
 
-            PROJECT_SETTINGS="$(find .nova_n10_source -type f \
+            PROJECT_SETTINGS="$(find .nova_n10_source \
+              -type f \
               \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) \
               | head -n 1)"
 
             if [ -z "${PROJECT_SETTINGS}" ]; then
-              echo "::error::settings.gradle(.kts) não encontrado após extrair o ZIP."
-              echo "Conteúdo extraído:"
-              find .nova_n10_source -maxdepth 5 -type f | sort | head -500
+              echo "::error::settings.gradle(.kts) não encontrado após extração."
+
+              echo "Arquivos extraídos:"
+              find .nova_n10_source -maxdepth 6 -type f | sort
+
               exit 1
             fi
 
@@ -94,55 +98,23 @@ jobs:
 
           PROJECT_DIR="$(cd "${PROJECT_DIR}" && pwd)"
 
-          echo "Projeto NOVA N10:"
+          echo "NOVA_N10_PROJECT=${PROJECT_DIR}" >> "${GITHUB_ENV}"
+
+          echo "Projeto:"
           echo "${PROJECT_DIR}"
 
-          echo "PROJECT_DIR=${PROJECT_DIR}" >> "${GITHUB_ENV}"
+          echo "settings:"
+          find "${PROJECT_DIR}" \
+            -maxdepth 1 \
+            -type f \
+            -name 'settings.gradle*' \
+            -print
 
-          echo "Estrutura:"
-          find "${PROJECT_DIR}" -maxdepth 3 -type f | sort | head -500
-
-      - name: Install Gradle
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          GRADLE_HOME="${RUNNER_TEMP}/gradle-${GRADLE_VERSION}"
-
-          if [ ! -x "${GRADLE_HOME}/bin/gradle" ]; then
-            mkdir -p "${GRADLE_HOME}"
-
-            curl -fL --retry 5 --retry-all-errors \
-              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
-              -o "${RUNNER_TEMP}/gradle.zip"
-
-            rm -rf "${RUNNER_TEMP}/gradle-extract"
-            mkdir -p "${RUNNER_TEMP}/gradle-extract"
-
-            unzip -q "${RUNNER_TEMP}/gradle.zip" \
-              -d "${RUNNER_TEMP}/gradle-extract"
-
-            EXTRACTED="$(find "${RUNNER_TEMP}/gradle-extract" \
-              -maxdepth 2 \
-              -type f \
-              -path "*/bin/gradle" \
-              | head -n 1)"
-
-            if [ -z "${EXTRACTED}" ]; then
-              echo "::error::Gradle ${GRADLE_VERSION} não foi encontrado após extração."
-              exit 1
-            fi
-
-            FOUND_HOME="$(dirname "$(dirname "${EXTRACTED}")")"
-
-            rm -rf "${GRADLE_HOME}"
-            mv "${FOUND_HOME}" "${GRADLE_HOME}"
-          fi
-
-          echo "GRADLE_HOME=${GRADLE_HOME}" >> "${GITHUB_ENV}"
-          echo "${GRADLE_HOME}/bin" >> "${GITHUB_PATH}"
-
-          gradle --version
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-provider: basic
 
       - name: Detect Android SDK
         shell: bash
@@ -156,11 +128,25 @@ jobs:
           fi
 
           if [ -z "${SDKMANAGER}" ]; then
-            SDKMANAGER="$(find "${ANDROID_HOME:-/opt/android-sdk}" \
-              "${ANDROID_SDK_ROOT:-/opt/android-sdk}" \
-              "${HOME}/android-sdk" \
-              -type f -name sdkmanager \
-              2>/dev/null | head -n 1 || true)"
+            for ROOT in \
+              "${ANDROID_HOME:-}" \
+              "${ANDROID_SDK_ROOT:-}" \
+              "/opt/android-sdk" \
+              "${HOME}/Android/Sdk"
+            do
+              if [ -n "${ROOT}" ] && [ -x "${ROOT}/cmdline-tools/latest/bin/sdkmanager" ]; then
+                SDKMANAGER="${ROOT}/cmdline-tools/latest/bin/sdkmanager"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "${SDKMANAGER}" ]; then
+            SDKMANAGER="$(find /opt /usr/local "${HOME}" \
+              -type f \
+              -name sdkmanager \
+              2>/dev/null \
+              | head -n 1 || true)"
           fi
 
           if [ -z "${SDKMANAGER}" ]; then
@@ -170,13 +156,15 @@ jobs:
 
           SDK_ROOT="$(cd "$(dirname "${SDKMANAGER}")/../../.." && pwd)"
 
-          echo "Android SDK: ${SDK_ROOT}"
           echo "ANDROID_HOME=${SDK_ROOT}" >> "${GITHUB_ENV}"
           echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "${GITHUB_ENV}"
 
           echo "${SDK_ROOT}/platform-tools" >> "${GITHUB_PATH}"
           echo "${SDK_ROOT}/cmdline-tools/latest/bin" >> "${GITHUB_PATH}"
           echo "${SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS}" >> "${GITHUB_PATH}"
+
+          echo "Android SDK:"
+          echo "${SDK_ROOT}"
 
       - name: Install Android components
         shell: bash
@@ -187,13 +175,9 @@ jobs:
 
           if [ ! -x "${SDKMANAGER}" ]; then
             SDKMANAGER="$(find "${ANDROID_SDK_ROOT}" \
-              -type f -name sdkmanager \
+              -type f \
+              -name sdkmanager \
               | head -n 1)"
-          fi
-
-          if [ -z "${SDKMANAGER}" ] || [ ! -x "${SDKMANAGER}" ]; then
-            echo "::error::sdkmanager inválido."
-            exit 1
           fi
 
           yes | "${SDKMANAGER}" --licenses >/dev/null || true
@@ -210,36 +194,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "=== Java ==="
           java -version
-
-          echo "=== Gradle ==="
           gradle --version
-
-          echo "=== ADB ==="
           adb version
-
-          echo "=== AAPT2 ==="
           aapt2 version
-
-          echo "=== ZIPALIGN ==="
-          zipalign -h | head -n 3
-
-          echo "=== CMake ==="
           cmake --version
 
-          echo "=== Android SDK ==="
-          echo "${ANDROID_SDK_ROOT}"
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT}"
 
-          echo "=== NDK ==="
-          ls -la "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          test -x "${ANDROID_SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS}/zipalign"
+
+          test -d "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
+          test -d "${ANDROID_SDK_ROOT}/cmake/${CMAKE_VERSION}"
 
       - name: Verify NOVA N10 structure
+        working-directory: ${{ env.NOVA_N10_PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
-
-          cd "${PROJECT_DIR}"
 
           test -f settings.gradle.kts -o -f settings.gradle
           test -f build.gradle.kts -o -f build.gradle
@@ -249,14 +222,13 @@ jobs:
           test -f core/build.gradle.kts -o -f core/build.gradle
           test -f app/src/main/cpp/CMakeLists.txt
 
-          echo "Estrutura NOVA N10 válida."
+          echo "Estrutura NOVA N10 OK."
 
       - name: Normalize Kotlin compatibility
+        working-directory: ${{ env.NOVA_N10_PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
-
-          cd "${PROJECT_DIR}"
 
           if [ -f build.gradle.kts ]; then
             if grep -q \
@@ -267,7 +239,7 @@ jobs:
                 's/id("org.jetbrains.kotlin.android") version "2.0.21" apply false/id("org.jetbrains.kotlin.android") version "2.2.21" apply false/' \
                 build.gradle.kts
 
-              echo "Kotlin 2.0.21 -> 2.2.21 aplicado somente na cópia de CI."
+              echo "Kotlin 2.0.21 -> 2.2.21 aplicado na cópia de CI."
             fi
           fi
 
@@ -278,20 +250,21 @@ jobs:
             2>/dev/null || true
 
       - name: Verify Gradle configuration
+        working-directory: ${{ env.NOVA_N10_PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "${PROJECT_DIR}"
-
-          gradle --no-daemon --stacktrace help
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            help
 
       - name: Run unit tests
+        working-directory: ${{ env.NOVA_N10_PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
-
-          cd "${PROJECT_DIR}"
 
           gradle \
             --no-daemon \
@@ -299,11 +272,10 @@ jobs:
             :app:testDebugUnitTest
 
       - name: Build Debug APK
+        working-directory: ${{ env.NOVA_N10_PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
-
-          cd "${PROJECT_DIR}"
 
           gradle \
             --no-daemon \
@@ -311,11 +283,10 @@ jobs:
             :app:assembleDebug
 
       - name: Build Release APK
+        working-directory: ${{ env.NOVA_N10_PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
-
-          cd "${PROJECT_DIR}"
 
           gradle \
             --no-daemon \
@@ -327,31 +298,37 @@ jobs:
         run: |
           set -euo pipefail
 
-          DEBUG_APK="$(find "${PROJECT_DIR}/app/build/outputs/apk" \
-            -type f -name '*debug*.apk' \
+          DEBUG_APK="$(find "${NOVA_N10_PROJECT}/app/build/outputs/apk" \
+            -type f \
+            -name '*debug*.apk' \
             | head -n 1)"
 
-          RELEASE_APK="$(find "${PROJECT_DIR}/app/build/outputs/apk" \
-            -type f -name '*release*.apk' \
+          RELEASE_APK="$(find "${NOVA_N10_PROJECT}/app/build/outputs/apk" \
+            -type f \
+            -name '*release*.apk' \
             | head -n 1)"
 
           if [ -z "${DEBUG_APK}" ]; then
             echo "::error::Debug APK não encontrado."
-            find "${PROJECT_DIR}/app/build/outputs" -type f -print || true
+            find "${NOVA_N10_PROJECT}/app/build/outputs" \
+              -type f \
+              -print || true
             exit 1
           fi
 
           if [ -z "${RELEASE_APK}" ]; then
             echo "::error::Release APK não encontrado."
-            find "${PROJECT_DIR}/app/build/outputs" -type f -print || true
+            find "${NOVA_N10_PROJECT}/app/build/outputs" \
+              -type f \
+              -print || true
             exit 1
           fi
 
           echo "DEBUG_APK=${DEBUG_APK}" >> "${GITHUB_ENV}"
           echo "RELEASE_APK=${RELEASE_APK}" >> "${GITHUB_ENV}"
 
-          echo "Debug: ${DEBUG_APK}"
-          echo "Release: ${RELEASE_APK}"
+          echo "DEBUG=${DEBUG_APK}"
+          echo "RELEASE=${RELEASE_APK}"
 
       - name: Validate APK 16 KB zip alignment
         shell: bash
@@ -383,9 +360,9 @@ jobs:
             'lib/*' \
             -d "${RUNNER_TEMP}/nova-apk-libs"
 
-          echo "Native libraries:"
           find "${RUNNER_TEMP}/nova-apk-libs" \
             -type f \
+            -name '*.so' \
             -print
 
       - name: Validate ELF 16 KB alignment
@@ -393,15 +370,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          READELF="$(find "${ANDROID_NDK_ROOT:-${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}}" \
-            -type f -name llvm-readelf \
+          READELF="$(find "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" \
+            -type f \
+            -name llvm-readelf \
             | head -n 1)"
-
-          if [ -z "${READELF}" ]; then
-            READELF="$(find "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" \
-              -type f -name llvm-readelf \
-              | head -n 1)"
-          fi
 
           if [ -z "${READELF}" ]; then
             echo "::error::llvm-readelf não encontrado."
@@ -423,35 +395,37 @@ jobs:
 
               case "${ALIGN}" in
                 2**12|2**13)
-                  echo "::error::ELF LOAD segment com alinhamento inferior a 16 KB: ${ALIGN}"
+                  echo "::error::ELF LOAD desalinhado para 16 KB: ${ALIGN}"
                   FAILED=1
                   ;;
               esac
             done < <(echo "${OUTPUT}" | grep "LOAD" || true)
 
-          done < <(find "${RUNNER_TEMP}/nova-apk-libs" -type f -name '*.so')
+          done < <(
+            find "${RUNNER_TEMP}/nova-apk-libs" \
+              -type f \
+              -name '*.so'
+          )
 
           if [ "${FAILED}" -ne 0 ]; then
             exit 1
           fi
-
-          echo
-          echo "ELF 16 KB alignment check concluído."
 
       - name: Validate native build outputs
         shell: bash
         run: |
           set -euo pipefail
 
-          NATIVE_DIR="${PROJECT_DIR}/app/build/intermediates"
+          NATIVE_DIR="${NOVA_N10_PROJECT}/app/build/intermediates"
 
           if [ ! -d "${NATIVE_DIR}" ]; then
-            echo "Diretório intermediário native não encontrado; usando somente validação do APK."
+            echo "Nenhum diretório native intermediário encontrado."
             exit 0
           fi
 
           READELF="$(find "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" \
-            -type f -name llvm-readelf \
+            -type f \
+            -name llvm-readelf \
             | head -n 1)"
 
           FAILED=0
@@ -472,18 +446,22 @@ jobs:
               esac
             done < <(echo "${OUTPUT}" | grep "LOAD" || true)
 
-          done < <(find "${NATIVE_DIR}" -type f -name '*.so' 2>/dev/null || true)
+          done < <(
+            find "${NATIVE_DIR}" \
+              -type f \
+              -name '*.so' \
+              2>/dev/null || true
+          )
 
           if [ "${FAILED}" -ne 0 ]; then
             exit 1
           fi
 
       - name: Run project audits
+        working-directory: ${{ env.NOVA_N10_PROJECT }}
         shell: bash
         run: |
           set -euo pipefail
-
-          cd "${PROJECT_DIR}"
 
           if [ -f tools/check_declarations.py ]; then
             python3 tools/check_declarations.py
@@ -514,7 +492,7 @@ jobs:
             echo "CMake: ${CMAKE_VERSION}"
             echo
             echo "Project:"
-            echo "${PROJECT_DIR}"
+            echo "${NOVA_N10_PROJECT}"
             echo
             echo "Debug APK:"
             echo "${DEBUG_APK}"
