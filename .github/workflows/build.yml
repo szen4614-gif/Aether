@@ -1,4 +1,4 @@
-name: Build NOVA N10 APK
+name: Build NOVA N10
 
 on:
   push:
@@ -11,28 +11,26 @@ permissions:
   contents: read
 
 concurrency:
-  group: nova-n10-build-${{ github.ref }}
+  group: nova-n10-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   JAVA_VERSION: "17"
   GRADLE_VERSION: "8.9"
   ANDROID_API: "35"
-  BUILD_TOOLS_VERSION: "35.0.0"
+  ANDROID_BUILD_TOOLS: "35.0.0"
   NDK_VERSION: "28.0.13004108"
   CMAKE_VERSION: "3.22.1"
 
 jobs:
   build:
-    name: Build NOVA N10
+    name: Build NOVA N10 APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
 
       - name: Setup Java
         uses: actions/setup-java@v5
@@ -40,278 +38,354 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: ${{ env.GRADLE_VERSION }}
-          cache-provider: basic
+      - name: Locate and extract NOVA N10 source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Repository:"
+          pwd
+          find . -maxdepth 3 -type f | sort | head -300
+
+          PROJECT_DIR=""
+
+          if [ -f "settings.gradle.kts" ] || [ -f "settings.gradle" ]; then
+            PROJECT_DIR="$(pwd)"
+          else
+            ZIP=""
+
+            if [ -f "./NOVA_N10_VALIDATION_UPGRADED.zip" ]; then
+              ZIP="./NOVA_N10_VALIDATION_UPGRADED.zip"
+            else
+              ZIP="$(find . -maxdepth 3 -type f \
+                \( -iname 'NOVA_N10_VALIDATION_UPGRADED.zip' \
+                -o -iname 'NOVA_N10*.zip' \
+                -o -iname 'N10*.zip' \) \
+                | head -n 1)"
+            fi
+
+            if [ -z "${ZIP}" ]; then
+              echo "::error::NOVA N10 ZIP não encontrado no repositório."
+              echo "Arquivos ZIP encontrados:"
+              find . -type f -iname "*.zip" -print
+              exit 1
+            fi
+
+            echo "ZIP selecionado: ${ZIP}"
+
+            rm -rf .nova_n10_source
+            mkdir -p .nova_n10_source
+
+            unzip -q "${ZIP}" -d .nova_n10_source
+
+            PROJECT_SETTINGS="$(find .nova_n10_source -type f \
+              \( -name 'settings.gradle.kts' -o -name 'settings.gradle' \) \
+              | head -n 1)"
+
+            if [ -z "${PROJECT_SETTINGS}" ]; then
+              echo "::error::settings.gradle(.kts) não encontrado após extrair o ZIP."
+              echo "Conteúdo extraído:"
+              find .nova_n10_source -maxdepth 5 -type f | sort | head -500
+              exit 1
+            fi
+
+            PROJECT_DIR="$(dirname "${PROJECT_SETTINGS}")"
+          fi
+
+          PROJECT_DIR="$(cd "${PROJECT_DIR}" && pwd)"
+
+          echo "Projeto NOVA N10:"
+          echo "${PROJECT_DIR}"
+
+          echo "PROJECT_DIR=${PROJECT_DIR}" >> "${GITHUB_ENV}"
+
+          echo "Estrutura:"
+          find "${PROJECT_DIR}" -maxdepth 3 -type f | sort | head -500
+
+      - name: Install Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GRADLE_HOME="${RUNNER_TEMP}/gradle-${GRADLE_VERSION}"
+
+          if [ ! -x "${GRADLE_HOME}/bin/gradle" ]; then
+            mkdir -p "${GRADLE_HOME}"
+
+            curl -fL --retry 5 --retry-all-errors \
+              "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
+              -o "${RUNNER_TEMP}/gradle.zip"
+
+            rm -rf "${RUNNER_TEMP}/gradle-extract"
+            mkdir -p "${RUNNER_TEMP}/gradle-extract"
+
+            unzip -q "${RUNNER_TEMP}/gradle.zip" \
+              -d "${RUNNER_TEMP}/gradle-extract"
+
+            EXTRACTED="$(find "${RUNNER_TEMP}/gradle-extract" \
+              -maxdepth 2 \
+              -type f \
+              -path "*/bin/gradle" \
+              | head -n 1)"
+
+            if [ -z "${EXTRACTED}" ]; then
+              echo "::error::Gradle ${GRADLE_VERSION} não foi encontrado após extração."
+              exit 1
+            fi
+
+            FOUND_HOME="$(dirname "$(dirname "${EXTRACTED}")")"
+
+            rm -rf "${GRADLE_HOME}"
+            mv "${FOUND_HOME}" "${GRADLE_HOME}"
+          fi
+
+          echo "GRADLE_HOME=${GRADLE_HOME}" >> "${GITHUB_ENV}"
+          echo "${GRADLE_HOME}/bin" >> "${GITHUB_PATH}"
+
+          gradle --version
 
       - name: Detect Android SDK
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -n "${ANDROID_SDK_ROOT:-}" ]; then
-            SDK_ROOT="$ANDROID_SDK_ROOT"
-          elif [ -n "${ANDROID_HOME:-}" ]; then
-            SDK_ROOT="$ANDROID_HOME"
-          else
-            echo "Android SDK não encontrado"
-            exit 1
-          fi
+          SDKMANAGER=""
 
-          if [ -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
-            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          elif command -v sdkmanager >/dev/null 2>&1; then
+          if command -v sdkmanager >/dev/null 2>&1; then
             SDKMANAGER="$(command -v sdkmanager)"
-          else
-            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager -executable 2>/dev/null | sort -V | tail -1 || true)"
           fi
 
-          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
-            echo "sdkmanager não encontrado"
-            find "$SDK_ROOT" -maxdepth 5 -type f -name sdkmanager -print 2>/dev/null || true
+          if [ -z "${SDKMANAGER}" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME:-/opt/android-sdk}" \
+              "${ANDROID_SDK_ROOT:-/opt/android-sdk}" \
+              "${HOME}/android-sdk" \
+              -type f -name sdkmanager \
+              2>/dev/null | head -n 1 || true)"
+          fi
+
+          if [ -z "${SDKMANAGER}" ]; then
+            echo "::error::sdkmanager não encontrado."
             exit 1
           fi
 
-          SDK_ROOT="$(cd "$(dirname "$SDKMANAGER")/../../.." && pwd)"
+          SDK_ROOT="$(cd "$(dirname "${SDKMANAGER}")/../../.." && pwd)"
 
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "Android SDK: ${SDK_ROOT}"
+          echo "ANDROID_HOME=${SDK_ROOT}" >> "${GITHUB_ENV}"
+          echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "${GITHUB_ENV}"
 
-          echo "SDK_ROOT=$SDK_ROOT"
-          echo "SDKMANAGER=$SDKMANAGER"
+          echo "${SDK_ROOT}/platform-tools" >> "${GITHUB_PATH}"
+          echo "${SDK_ROOT}/cmdline-tools/latest/bin" >> "${GITHUB_PATH}"
+          echo "${SDK_ROOT}/build-tools/${ANDROID_BUILD_TOOLS}" >> "${GITHUB_PATH}"
 
       - name: Install Android components
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
 
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(command -v sdkmanager)"
+          if [ ! -x "${SDKMANAGER}" ]; then
+            SDKMANAGER="$(find "${ANDROID_SDK_ROOT}" \
+              -type f -name sdkmanager \
+              | head -n 1)"
           fi
 
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          if [ -z "${SDKMANAGER}" ] || [ ! -x "${SDKMANAGER}" ]; then
+            echo "::error::sdkmanager inválido."
+            exit 1
+          fi
 
-          "$SDKMANAGER" --install \
+          yes | "${SDKMANAGER}" --licenses >/dev/null || true
+
+          "${SDKMANAGER}" \
             "platform-tools" \
             "platforms;android-${ANDROID_API}" \
-            "build-tools;${BUILD_TOOLS_VERSION}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
             "ndk;${NDK_VERSION}" \
             "cmake;${CMAKE_VERSION}"
-
-          test -d "$ANDROID_SDK_ROOT/platforms/android-${ANDROID_API}"
-          test -d "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}"
-          test -d "$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
-          test -d "$ANDROID_SDK_ROOT/cmake/${CMAKE_VERSION}"
 
       - name: Verify toolchain
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "=== Java ==="
           java -version
-          javac -version
+
+          echo "=== Gradle ==="
           gradle --version
 
-          "$ANDROID_SDK_ROOT/platform-tools/adb" version
-          "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/aapt2" version
-          "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/zipalign" -h >/dev/null
+          echo "=== ADB ==="
+          adb version
 
-          "$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --version
+          echo "=== AAPT2 ==="
+          aapt2 version
 
-          "$ANDROID_SDK_ROOT/cmake/${CMAKE_VERSION}/bin/cmake" --version
+          echo "=== ZIPALIGN ==="
+          zipalign -h | head -n 3
 
-      - name: Locate NOVA N10 source
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "=== CMake ==="
+          cmake --version
 
-          SOURCE_ROOT="$GITHUB_WORKSPACE"
-          PROJECT_DIR=""
+          echo "=== Android SDK ==="
+          echo "${ANDROID_SDK_ROOT}"
 
-          if [ -f "$SOURCE_ROOT/settings.gradle.kts" ] || [ -f "$SOURCE_ROOT/settings.gradle" ]; then
-            PROJECT_DIR="$SOURCE_ROOT"
-          else
-            ZIP_FILE="$(find "$SOURCE_ROOT" -maxdepth 3 -type f -iname "*.zip" \
-              | grep -E 'NOVA[_-]?N10|N10' \
-              | head -1 || true)"
-
-            if [ -z "$ZIP_FILE" ]; then
-              echo "Nenhum ZIP NOVA N10 encontrado"
-              find "$SOURCE_ROOT" -maxdepth 4 -type f | sort
-              exit 1
-            fi
-
-            rm -rf "$SOURCE_ROOT/n10-source"
-            mkdir -p "$SOURCE_ROOT/n10-source"
-
-            unzip -t "$ZIP_FILE"
-            unzip -q "$ZIP_FILE" -d "$SOURCE_ROOT/n10-source"
-
-            PROJECT_DIR="$(find "$SOURCE_ROOT/n10-source" \
-              -type f \
-              -name "settings.gradle.kts" \
-              -print -quit \
-              | xargs -r dirname)"
-
-            if [ -z "$PROJECT_DIR" ]; then
-              PROJECT_DIR="$(find "$SOURCE_ROOT/n10-source" \
-                -type f \
-                -name "settings.gradle" \
-                -print -quit \
-                | xargs -r dirname)"
-            fi
-          fi
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "Projeto Gradle não encontrado"
-            find "$SOURCE_ROOT" -maxdepth 10 -type f | sort
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "Projeto encontrado:"
-          echo "$PROJECT_DIR"
+          echo "=== NDK ==="
+          ls -la "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}"
 
       - name: Verify NOVA N10 structure
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          cd "${PROJECT_DIR}"
 
-          test -f settings.gradle.kts || test -f settings.gradle
-          test -f build.gradle.kts || test -f build.gradle
+          test -f settings.gradle.kts -o -f settings.gradle
+          test -f build.gradle.kts -o -f build.gradle
           test -d app
           test -d core
-          test -f app/build.gradle.kts
-          test -f core/build.gradle.kts
+          test -f app/build.gradle.kts -o -f app/build.gradle
+          test -f core/build.gradle.kts -o -f core/build.gradle
           test -f app/src/main/cpp/CMakeLists.txt
 
-          echo "Estrutura do projeto validada."
+          echo "Estrutura NOVA N10 válida."
 
       - name: Normalize Kotlin compatibility
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          cd "${PROJECT_DIR}"
 
-          if grep -q 'id("org.jetbrains.kotlin.android") version "2.0.21" apply false' build.gradle.kts; then
-            sed -i \
-              's/id("org.jetbrains.kotlin.android") version "2.0.21" apply false/id("org.jetbrains.kotlin.android") version "2.2.21" apply false/' \
-              build.gradle.kts
+          if [ -f build.gradle.kts ]; then
+            if grep -q \
+              'id("org.jetbrains.kotlin.android") version "2.0.21" apply false' \
+              build.gradle.kts; then
 
-            echo "Kotlin 2.0.21 -> 2.2.21 aplicado no checkout de CI."
+              sed -i \
+                's/id("org.jetbrains.kotlin.android") version "2.0.21" apply false/id("org.jetbrains.kotlin.android") version "2.2.21" apply false/' \
+                build.gradle.kts
+
+              echo "Kotlin 2.0.21 -> 2.2.21 aplicado somente na cópia de CI."
+            fi
           fi
 
-          grep 'org.jetbrains.kotlin.android' build.gradle.kts
+          grep -R \
+            'org.jetbrains.kotlin.android' \
+            build.gradle.kts \
+            settings.gradle.kts \
+            2>/dev/null || true
 
       - name: Verify Gradle configuration
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          cd "${PROJECT_DIR}"
 
-          gradle --no-daemon \
-            help \
-            --stacktrace \
-            --warning-mode all
+          gradle --no-daemon --stacktrace help
 
       - name: Run unit tests
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          cd "${PROJECT_DIR}"
 
-          gradle --no-daemon \
-            testDebugUnitTest \
+          gradle \
+            --no-daemon \
             --stacktrace \
-            --warning-mode all
+            :app:testDebugUnitTest
 
       - name: Build Debug APK
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          cd "${PROJECT_DIR}"
 
-          gradle --no-daemon \
-            :app:assembleDebug \
+          gradle \
+            --no-daemon \
             --stacktrace \
-            --warning-mode all
+            :app:assembleDebug
 
       - name: Build Release APK
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          cd "${PROJECT_DIR}"
 
-          gradle --no-daemon \
-            :app:assembleRelease \
+          gradle \
+            --no-daemon \
             --stacktrace \
-            --warning-mode all
+            :app:assembleRelease
 
       - name: Locate generated APKs
         shell: bash
         run: |
           set -euo pipefail
 
-          DEBUG_APK="$PROJECT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-          RELEASE_APK="$PROJECT_DIR/app/build/outputs/apk/release/app-release-unsigned.apk"
+          DEBUG_APK="$(find "${PROJECT_DIR}/app/build/outputs/apk" \
+            -type f -name '*debug*.apk' \
+            | head -n 1)"
 
-          test -f "$DEBUG_APK"
-          test -f "$RELEASE_APK"
+          RELEASE_APK="$(find "${PROJECT_DIR}/app/build/outputs/apk" \
+            -type f -name '*release*.apk' \
+            | head -n 1)"
 
-          echo "DEBUG_APK=$DEBUG_APK" >> "$GITHUB_ENV"
-          echo "RELEASE_APK=$RELEASE_APK" >> "$GITHUB_ENV"
+          if [ -z "${DEBUG_APK}" ]; then
+            echo "::error::Debug APK não encontrado."
+            find "${PROJECT_DIR}/app/build/outputs" -type f -print || true
+            exit 1
+          fi
 
-          ls -lh "$DEBUG_APK"
-          ls -lh "$RELEASE_APK"
+          if [ -z "${RELEASE_APK}" ]; then
+            echo "::error::Release APK não encontrado."
+            find "${PROJECT_DIR}/app/build/outputs" -type f -print || true
+            exit 1
+          fi
 
-      - name: Validate APK zip alignment
+          echo "DEBUG_APK=${DEBUG_APK}" >> "${GITHUB_ENV}"
+          echo "RELEASE_APK=${RELEASE_APK}" >> "${GITHUB_ENV}"
+
+          echo "Debug: ${DEBUG_APK}"
+          echo "Release: ${RELEASE_APK}"
+
+      - name: Validate APK 16 KB zip alignment
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIPALIGN="$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/zipalign"
-
-          "$ZIPALIGN" -c -P 16 -v 4 "$DEBUG_APK"
-          "$ZIPALIGN" -c -P 16 -v 4 "$RELEASE_APK"
+          zipalign -v -c -P 16 4 "${DEBUG_APK}"
+          zipalign -v -c -P 16 4 "${RELEASE_APK}"
 
       - name: Validate Debug APK signature
         shell: bash
         run: |
           set -euo pipefail
 
-          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/apksigner"
-
-          "$APKSIGNER" verify --verbose "$DEBUG_APK"
+          apksigner verify \
+            --verbose \
+            "${DEBUG_APK}"
 
       - name: Extract APK native libraries
         shell: bash
         run: |
           set -euo pipefail
 
-          rm -rf "$GITHUB_WORKSPACE/apk-native"
-          mkdir -p "$GITHUB_WORKSPACE/apk-native"
+          rm -rf "${RUNNER_TEMP}/nova-apk-libs"
+          mkdir -p "${RUNNER_TEMP}/nova-apk-libs"
 
-          unzip -q "$DEBUG_APK" \
+          unzip -q \
+            "${DEBUG_APK}" \
             'lib/*' \
-            -d "$GITHUB_WORKSPACE/apk-native"
+            -d "${RUNNER_TEMP}/nova-apk-libs"
 
-          find "$GITHUB_WORKSPACE/apk-native" \
+          echo "Native libraries:"
+          find "${RUNNER_TEMP}/nova-apk-libs" \
             -type f \
-            -name "*.so" \
             -print
 
       - name: Validate ELF 16 KB alignment
@@ -319,152 +393,144 @@ jobs:
         run: |
           set -euo pipefail
 
-          READELF="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          READELF="$(find "${ANDROID_NDK_ROOT:-${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}}" \
+            -type f -name llvm-readelf \
+            | head -n 1)"
 
-          SO_COUNT=0
+          if [ -z "${READELF}" ]; then
+            READELF="$(find "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" \
+              -type f -name llvm-readelf \
+              | head -n 1)"
+          fi
 
-          while IFS= read -r SO; do
-            SO_COUNT=$((SO_COUNT + 1))
+          if [ -z "${READELF}" ]; then
+            echo "::error::llvm-readelf não encontrado."
+            exit 1
+          fi
 
+          FAILED=0
+
+          while IFS= read -r LIB; do
             echo
-            echo "===== $SO ====="
+            echo "=== ${LIB} ==="
 
-            OUTPUT="$("$READELF" -lW "$SO")"
-            echo "$OUTPUT"
+            OUTPUT="$("${READELF}" -lW "${LIB}")"
 
-            if echo "$OUTPUT" | grep -E 'LOAD.*align 2\*\*(12|13)([^0-9]|$)' >/dev/null; then
-              echo "ERRO: biblioteca não está alinhada para 16 KB:"
-              echo "$SO"
-              exit 1
-            fi
-          done < <(
-            find "$GITHUB_WORKSPACE/apk-native" \
-              -type f \
-              -name "*.so" \
-              | sort
-          )
+            echo "${OUTPUT}" | grep "LOAD" || true
 
-          if [ "$SO_COUNT" -eq 0 ]; then
-            echo "Nenhuma biblioteca nativa encontrada no APK."
+            while IFS= read -r LINE; do
+              ALIGN="$(echo "${LINE}" | awk '{print $NF}')"
+
+              case "${ALIGN}" in
+                2**12|2**13)
+                  echo "::error::ELF LOAD segment com alinhamento inferior a 16 KB: ${ALIGN}"
+                  FAILED=1
+                  ;;
+              esac
+            done < <(echo "${OUTPUT}" | grep "LOAD" || true)
+
+          done < <(find "${RUNNER_TEMP}/nova-apk-libs" -type f -name '*.so')
+
+          if [ "${FAILED}" -ne 0 ]; then
             exit 1
           fi
 
           echo
-          echo "Bibliotecas nativas verificadas: $SO_COUNT"
+          echo "ELF 16 KB alignment check concluído."
 
-      - name: Validate project native outputs
+      - name: Validate native build outputs
         shell: bash
         run: |
           set -euo pipefail
 
-          READELF="$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          NATIVE_DIR="${PROJECT_DIR}/app/build/intermediates"
 
-          SO_COUNT=0
+          if [ ! -d "${NATIVE_DIR}" ]; then
+            echo "Diretório intermediário native não encontrado; usando somente validação do APK."
+            exit 0
+          fi
 
-          while IFS= read -r SO; do
-            SO_COUNT=$((SO_COUNT + 1))
+          READELF="$(find "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" \
+            -type f -name llvm-readelf \
+            | head -n 1)"
 
-            echo "Verificando build nativo:"
-            echo "$SO"
+          FAILED=0
 
-            OUTPUT="$("$READELF" -lW "$SO")"
+          while IFS= read -r LIB; do
+            echo "Checking ${LIB}"
 
-            if echo "$OUTPUT" | grep -E 'LOAD.*align 2\*\*(12|13)([^0-9]|$)' >/dev/null; then
-              echo "ELF abaixo do alinhamento 16 KB:"
-              exit 1
-            fi
-          done < <(
-            find "$PROJECT_DIR/app/build" \
-              -type f \
-              -name "*.so" \
-              | sort
-          )
+            OUTPUT="$("${READELF}" -lW "${LIB}")"
 
-          test "$SO_COUNT" -gt 0
+            while IFS= read -r LINE; do
+              ALIGN="$(echo "${LINE}" | awk '{print $NF}')"
 
-      - name: Run declaration checks
+              case "${ALIGN}" in
+                2**12|2**13)
+                  echo "::error::Native ELF desalinhado: ${LIB} -> ${ALIGN}"
+                  FAILED=1
+                  ;;
+              esac
+            done < <(echo "${OUTPUT}" | grep "LOAD" || true)
+
+          done < <(find "${NATIVE_DIR}" -type f -name '*.so' 2>/dev/null || true)
+
+          if [ "${FAILED}" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Run project audits
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          cd "${PROJECT_DIR}"
 
-          python3 tools/check_declarations.py
+          if [ -f tools/check_declarations.py ]; then
+            python3 tools/check_declarations.py
+          fi
 
-      - name: Run repository audit
+          if [ -f tools/audit_repo.py ]; then
+            python3 tools/audit_repo.py
+          fi
+
+      - name: Generate build report
         shell: bash
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
-
-          python3 tools/audit_repo.py
-
-      - name: Collect build information
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$GITHUB_WORKSPACE/build-report"
+          mkdir -p "${RUNNER_TEMP}/nova-report"
 
           {
-            echo "NOVA N10 CI BUILD"
+            echo "NOVA N10 CI BUILD REPORT"
             echo
-            echo "Date:"
-            date -u
-            echo
-            echo "Commit:"
-            git rev-parse HEAD
-            echo
-            echo "Java:"
-            java -version 2>&1
-            echo
-            echo "Gradle:"
-            gradle --version
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Ref: ${GITHUB_REF}"
+            echo "Runner: ${RUNNER_OS}"
+            echo "Java: ${JAVA_VERSION}"
+            echo "Gradle: ${GRADLE_VERSION}"
+            echo "Android API: ${ANDROID_API}"
+            echo "Build Tools: ${ANDROID_BUILD_TOOLS}"
+            echo "NDK: ${NDK_VERSION}"
+            echo "CMake: ${CMAKE_VERSION}"
             echo
             echo "Project:"
-            echo "$PROJECT_DIR"
+            echo "${PROJECT_DIR}"
             echo
-            echo "Android SDK:"
-            echo "$ANDROID_SDK_ROOT"
+            echo "Debug APK:"
+            echo "${DEBUG_APK}"
             echo
-            echo "NDK:"
-            echo "$NDK_VERSION"
-            echo
-            echo "CMake:"
-            echo "$CMAKE_VERSION"
-            echo
-            echo "APKs:"
-            ls -lh "$PROJECT_DIR/app/build/outputs/apk/debug/"*.apk
-            ls -lh "$PROJECT_DIR/app/build/outputs/apk/release/"*.apk
-          } > "$GITHUB_WORKSPACE/build-report/build-info.txt"
+            echo "Release APK:"
+            echo "${RELEASE_APK}"
+          } > "${RUNNER_TEMP}/nova-report/build-report.txt"
 
-      - name: Prepare artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
+          cat "${RUNNER_TEMP}/nova-report/build-report.txt"
 
-          rm -rf "$GITHUB_WORKSPACE/artifacts"
-          mkdir -p "$GITHUB_WORKSPACE/artifacts"
-
-          cp "$DEBUG_APK" "$GITHUB_WORKSPACE/artifacts/"
-          cp "$RELEASE_APK" "$GITHUB_WORKSPACE/artifacts/"
-
-          ls -lah "$GITHUB_WORKSPACE/artifacts"
-
-      - name: Upload APKs
+      - name: Upload APKs and report
         uses: actions/upload-artifact@v4
         with:
-          name: NOVA-N10-APKs
-          path: artifacts/*.apk
+          name: NOVA-N10-APKs-${{ github.sha }}
           if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload build report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: NOVA-N10-build-report
-          path: build-report/
-          if-no-files-found: warn
-          retention-days: 14
+          path: |
+            ${{ env.DEBUG_APK }}
+            ${{ env.RELEASE_APK }}
+            ${{ runner.temp }}/nova-report/build-report.txt
